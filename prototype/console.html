@@ -1,0 +1,1258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go2W 导航控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<style>
+/* Layout: control-room console — health strip on top, layers | map stage + drawer | task & control rail */
+:root{
+  color-scheme:dark;
+  --bg:#04070c; --panel:#09101a; --panel-2:#0d1622; --raise:#132032; --line:#172334; --line-2:#22334a;
+  --fg:#dbe6f3; --fg-2:#9db0c7; --muted:#5f718a;
+  --accent:#38e1dc; --accent-soft:rgba(56,225,220,.12); --accent-line:rgba(56,225,220,.35);
+  --cloud:#ff4fa3; --traj:#b28cff; --particle:#ffe08a;
+  --ok:#35d48a; --warn:#f3b13f; --crit:#ff4b5c;
+  --f-display:"Chakra Petch","Noto Sans SC",system-ui,sans-serif;
+  --f-body:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:13px;overflow:hidden;
+  background-image:radial-gradient(1200px 600px at 50% -10%,rgba(56,225,220,.06),transparent 60%)}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+kbd{font-family:var(--f-mono);font-size:10px;padding:1px 5px;border:1px solid var(--line-2);border-bottom-width:2px;border-radius:4px;color:var(--fg-2);background:var(--panel)}
+
+.app{height:100%;display:grid;grid-template-rows:56px minmax(0,1fr);gap:10px;padding-block:10px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.panel{background:linear-gradient(180deg,var(--panel-2),var(--panel));border:1px solid var(--line);border-radius:10px}
+
+/* ---------- top bar ---------- */
+.top{display:flex;align-items:center;gap:18px;padding:0 10px 0 14px}
+.brand{display:flex;align-items:center;gap:10px;flex:none}
+.brand svg{width:30px;height:30px}
+.brand-name{font-family:var(--f-display);font-weight:700;font-size:17px;letter-spacing:.06em;line-height:1}
+.brand-name span{font-family:var(--f-body);font-weight:500;font-size:14px;letter-spacing:.02em;margin-left:8px;color:var(--fg-2)}
+.brand-sub{font-family:var(--f-display);font-size:10px;letter-spacing:.18em;color:var(--muted);margin-top:4px}
+.brand-sub b{color:var(--warn);font-weight:600}
+.chips{display:flex;gap:6px;flex:1;min-width:0;overflow:hidden}
+.chip{display:flex;align-items:center;gap:7px;height:30px;padding:0 11px;border-radius:7px;background:var(--panel);border:1px solid var(--line);white-space:nowrap;flex:none}
+.chip i{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.chip .k{color:var(--muted);font-size:12px}
+.chip b{font-family:var(--f-mono);font-weight:500;font-size:12px}
+.chip[data-s="ok"] i{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.chip[data-s="warn"] i{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+.chip[data-s="warn"] b{color:var(--warn)}
+.chip[data-s="crit"]{border-color:rgba(255,75,92,.5);background:rgba(255,75,92,.08)}
+.chip[data-s="crit"] i{background:var(--crit);box-shadow:0 0 8px var(--crit)}
+.chip[data-s="crit"] b{color:var(--crit)}
+.chip.rec{border-color:rgba(255,75,92,.45)}
+.chip.rec i{background:var(--crit);animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:.2}}
+.top-right{display:flex;align-items:center;gap:10px;flex:none}
+.seg{display:flex;padding:3px;border-radius:8px;background:var(--panel);border:1px solid var(--line)}
+.seg button{border:0;background:none;padding:5px 12px;border-radius:6px;color:var(--fg-2);font-size:12px}
+.seg button.on{background:var(--raise);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line-2)}
+.clock{font-family:var(--f-mono);font-size:13px;color:var(--fg-2);min-width:64px;text-align:right}
+.estop{display:flex;align-items:center;gap:9px;height:38px;padding:0 14px 0 10px;border-radius:8px;border:1px solid rgba(255,75,92,.65);
+  background:linear-gradient(180deg,#d82f43,#9e1b2c);color:#fff;font-weight:700;letter-spacing:.08em;box-shadow:0 0 0 3px rgba(255,75,92,.12),0 6px 20px rgba(216,47,67,.25)}
+.estop:hover{filter:brightness(1.1)}
+.estop kbd{background:rgba(0,0,0,.25);border-color:rgba(255,255,255,.3);color:#fff}
+.estop-ring{width:18px;height:18px;border-radius:50%;border:2px solid #fff;position:relative}
+.estop-ring::after{content:"";position:absolute;inset:3px;border-radius:50%;background:#fff}
+
+/* ---------- main grid ---------- */
+.main{display:grid;grid-template-columns:288px minmax(0,1fr) 336px;gap:10px;min-height:0}
+.col{display:flex;flex-direction:column;gap:10px;min-height:0;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+.center{display:grid;grid-template-rows:minmax(0,1fr) auto;gap:10px;min-height:0;min-width:0}
+body.demo .main{grid-template-columns:minmax(0,1fr) 336px}
+body.demo .left,body.demo .drawer,body.demo .debug-only{display:none}
+
+.card{padding:12px 14px}
+.card-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.card-h h3{margin:0;font-size:13px;font-weight:700;letter-spacing:.04em;display:flex;align-items:center;gap:8px}
+.card-h h3::before{content:"";width:3px;height:12px;border-radius:2px;background:var(--accent)}
+.card-h .meta{font-family:var(--f-mono);font-size:11px;color:var(--muted)}
+.pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line-2);color:var(--fg-2);white-space:nowrap}
+.pill[data-s="ok"]{color:var(--ok);border-color:rgba(53,212,138,.4);background:rgba(53,212,138,.08)}
+.pill[data-s="run"]{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+.pill[data-s="warn"]{color:var(--warn);border-color:rgba(243,177,63,.4);background:rgba(243,177,63,.08)}
+.pill[data-s="crit"]{color:var(--crit);border-color:rgba(255,75,92,.45);background:rgba(255,75,92,.08)}
+
+/* robot card */
+.robot{display:grid;grid-template-columns:64px 1fr;gap:12px;align-items:center}
+.robot-ico{width:64px;height:64px;border-radius:10px;background:radial-gradient(circle at 50% 60%,rgba(56,225,220,.18),transparent 70%),var(--panel);border:1px solid var(--line);display:grid;place-items:center}
+.robot-name{font-family:var(--f-display);font-weight:700;font-size:18px;letter-spacing:.04em}
+.robot-sub{color:var(--muted);font-size:11px;margin-top:2px}
+.stat4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:12px}
+.stat4 div{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 7px}
+.stat4 span{display:block;font-size:10px;color:var(--muted)}
+.stat4 b{font-family:var(--f-mono);font-weight:500;font-size:12px}
+
+/* layers */
+.layers{display:flex;flex-direction:column;gap:2px}
+.layer{display:grid;grid-template-columns:12px 1fr auto 30px;align-items:center;gap:9px;padding:6px 6px;border-radius:6px}
+.layer:hover{background:var(--panel)}
+.sw{width:10px;height:10px;border-radius:3px}
+.layer .nm{font-size:12.5px;min-width:0}
+.layer .nm small{display:block;font-family:var(--f-mono);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.layer .hz{font-family:var(--f-mono);font-size:10px;color:var(--muted)}
+.tg{width:30px;height:17px;border-radius:999px;background:var(--line-2);border:0;position:relative;padding:0;transition:background .15s}
+.tg::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--fg-2);transition:transform .15s}
+.tg[aria-checked="true"]{background:rgba(56,225,220,.45)}
+.tg[aria-checked="true"]::after{transform:translateX(13px);background:#fff}
+
+/* topics */
+.topics-card{flex:1;min-height:220px;display:flex;flex-direction:column}
+.search{width:100%;height:30px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--fg);padding:0 10px;font:12px var(--f-mono);margin-bottom:6px}
+.topics{overflow:auto;flex:1;min-height:0;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+.topic{display:grid;grid-template-columns:7px 1fr auto;gap:8px;align-items:center;width:100%;text-align:left;border:0;background:none;padding:6px 6px;border-radius:6px}
+.topic:hover{background:var(--panel)}
+.topic i{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.topic.off i{background:var(--muted)}
+.topic.off .tn{color:var(--muted)}
+.topic .tn{font-family:var(--f-mono);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topic .tt{display:block;font-size:10px;color:var(--muted);font-family:var(--f-mono)}
+.topic .th{font-family:var(--f-mono);font-size:11px;color:var(--fg-2)}
+.dom0{font-size:9px;color:var(--warn);border:1px solid rgba(243,177,63,.35);border-radius:3px;padding:0 3px;margin-left:4px}
+
+/* ---------- stage ---------- */
+.stage{position:relative;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#03060a;min-height:320px}
+.stage canvas{position:absolute;inset:0;display:block;touch-action:none}
+.stage::before,.stage::after{content:"";position:absolute;width:22px;height:22px;pointer-events:none;z-index:2;border:1.5px solid var(--accent-line)}
+.stage::before{top:8px;left:8px;border-right:0;border-bottom:0}
+.stage::after{bottom:8px;right:8px;border-left:0;border-top:0}
+.hud{position:absolute;z-index:3;background:rgba(6,11,18,.78);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:8px}
+.hud-tl{top:14px;left:14px;padding:9px 12px;display:grid;grid-template-columns:auto auto;gap:3px 14px;font-size:11px}
+.hud-tl .k{color:var(--muted)}
+.hud-tl .v{font-family:var(--f-mono);color:var(--fg)}
+.hud-tl .title{grid-column:1/-1;display:flex;align-items:center;gap:8px;font-family:var(--f-display);font-size:12px;letter-spacing:.08em;margin-bottom:4px;color:var(--fg-2)}
+.hud-tl .title b{color:var(--fg);font-family:var(--f-mono);font-weight:500;letter-spacing:0}
+.hud-tr{top:14px;right:14px;display:flex;flex-direction:column;gap:2px;padding:4px}
+.ib{width:32px;height:32px;display:grid;place-items:center;border:0;background:none;border-radius:6px;color:var(--fg-2)}
+.ib:hover{background:var(--raise);color:var(--fg)}
+.ib.on{color:var(--accent);background:var(--accent-soft)}
+.ib svg{width:17px;height:17px}
+.toolbar{position:absolute;z-index:3;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:2px;padding:5px;border-radius:10px;
+  background:rgba(6,11,18,.85);backdrop-filter:blur(8px);border:1px solid var(--line-2);box-shadow:0 10px 30px rgba(0,0,0,.4)}
+.tool{display:flex;align-items:center;gap:7px;height:34px;padding:0 11px;border:0;background:none;border-radius:7px;color:var(--fg-2);font-size:12px;white-space:nowrap}
+.tool svg{width:16px;height:16px;flex:none}
+.tool:hover{background:var(--raise);color:var(--fg)}
+.tool.on{background:var(--accent-soft);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent-line)}
+.tool kbd{margin-left:2px}
+.tsep{width:1px;height:22px;background:var(--line-2);margin:0 4px}
+.hud-bl{left:14px;bottom:16px;padding:8px 11px;display:flex;flex-direction:column;gap:6px;font-size:11px}
+.scale{display:flex;align-items:center;gap:8px;font-family:var(--f-mono);color:var(--fg-2)}
+.scale-bar{height:6px;border:1.5px solid var(--fg-2);border-top:0}
+.cursor{font-family:var(--f-mono);color:var(--muted)}
+.cursor b{color:var(--fg-2);font-weight:400}
+.hud-br{right:14px;bottom:16px;padding:8px 11px;font-size:10.5px;color:var(--fg-2);display:flex;flex-direction:column;gap:5px}
+.lg{display:flex;align-items:center;gap:7px}
+.lg span{width:14px;height:3px;border-radius:2px}
+.grad{width:70px!important;height:6px!important;background:linear-gradient(90deg,#ff4fa3,#a86bff,#6fb6ff)}
+.toast{position:absolute;z-index:6;top:14px;left:50%;transform:translate(-50%,-8px);opacity:0;pointer-events:none;display:flex;align-items:center;gap:9px;
+  padding:9px 15px;border-radius:9px;background:rgba(10,18,28,.94);border:1px solid var(--line-2);font-size:13px;transition:opacity .2s,transform .2s;box-shadow:0 10px 30px rgba(0,0,0,.45)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast i{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-size:12px;font-weight:700;color:#03140c;background:var(--ok)}
+.toast[data-k="err"] i{background:var(--crit);color:#fff}
+.toast[data-k="warn"] i{background:var(--warn)}
+.banner{position:absolute;z-index:5;inset:0;display:grid;place-items:center;background:repeating-linear-gradient(135deg,rgba(255,75,92,.07) 0 14px,transparent 14px 28px);border:2px solid rgba(255,75,92,.55);border-radius:10px}
+.banner-box{text-align:center;padding:20px 28px;border-radius:12px;background:rgba(20,6,10,.92);border:1px solid rgba(255,75,92,.5)}
+.banner-box h2{margin:0 0 6px;font-family:var(--f-display);color:var(--crit);letter-spacing:.12em;font-size:22px}
+.banner-box p{margin:0 0 14px;color:var(--fg-2)}
+.tele{position:absolute;z-index:4;top:14px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;padding:8px 14px;border-radius:9px;background:rgba(6,11,18,.88);border:1px solid var(--accent-line);font-size:12px}
+.keys{display:grid;grid-template-columns:repeat(3,22px);gap:3px}
+.keys kbd{display:grid;place-items:center;height:20px;padding:0}
+.keys kbd.dn{background:var(--accent);color:#03140c;border-color:var(--accent)}
+.mode-tag{position:absolute;z-index:3;top:14px;left:50%;transform:translateX(-50%);padding:5px 12px;border-radius:999px;font-size:12px;color:var(--warn);border:1px solid rgba(243,177,63,.45);background:rgba(30,20,4,.8)}
+
+/* ---------- drawer ---------- */
+.drawer{display:flex;flex-direction:column;height:212px;min-width:0;transition:height .2s}
+.drawer.collapsed{height:40px}
+.dh{display:flex;align-items:center;gap:4px;padding:5px 8px;border-bottom:1px solid var(--line);flex:none}
+.dtab{border:0;background:none;padding:5px 12px;border-radius:6px;color:var(--fg-2);font-size:12px}
+.dtab.on{background:var(--raise);color:var(--fg)}
+.dh .sp{flex:1}
+.fchip{border:1px solid var(--line);background:none;padding:2px 9px;border-radius:999px;font-size:11px;color:var(--fg-2)}
+.fchip.on{border-color:var(--accent-line);color:var(--accent)}
+.db{flex:1;min-height:0;position:relative}
+.dpane{position:absolute;inset:0;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+.logs{font-family:var(--f-mono);font-size:11.5px;padding:6px 10px;line-height:1.65}
+.lrow{display:grid;grid-template-columns:92px 46px 150px 1fr;gap:10px;white-space:nowrap}
+.lrow .lt{color:var(--muted)}
+.lrow .ln{color:var(--fg-2);overflow:hidden;text-overflow:ellipsis}
+.lrow .lm{overflow:hidden;text-overflow:ellipsis}
+.lv{font-size:10px;font-weight:500;text-align:center;border-radius:3px;align-self:center;line-height:16px}
+.lv.INFO{color:var(--fg-2);background:var(--raise)}
+.lv.WARN{color:#1d1300;background:var(--warn)}
+.lv.ERROR{color:#fff;background:var(--crit)}
+.lrow.ERROR .lm{color:#ff9aa4}
+.lrow.WARN .lm{color:#f7cf86}
+.plots{display:grid;grid-template-columns:150px 1fr;height:100%}
+.plot-side{padding:10px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.plot-side button{text-align:left;border:0;background:none;padding:6px 9px;border-radius:6px;color:var(--fg-2);font-size:12px}
+.plot-side button.on{background:var(--raise);color:var(--fg)}
+.plot-wrap{position:relative;min-width:0}
+.plot-wrap canvas{position:absolute;inset:0;width:100%;height:100%}
+.mb{display:grid;grid-template-columns:1fr 1fr;gap:0;height:100%}
+.mb>div{padding:10px 14px;min-width:0;overflow:auto}
+.mb>div+div{border-left:1px solid var(--line)}
+.mb h4{margin:0 0 8px;font-size:12px;color:var(--fg-2);font-weight:500;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.mrow{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:6px 8px;border-radius:6px;font-size:12px}
+.mrow:hover{background:var(--panel)}
+.mrow .mn{font-family:var(--f-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mrow .mm{font-family:var(--f-mono);font-size:11px;color:var(--muted)}
+.inrow{display:flex;gap:6px;margin-bottom:6px}
+.inrow input{flex:1;min-width:0;height:28px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--fg);padding:0 9px;font:12px var(--f-mono)}
+
+/* ---------- right rail ---------- */
+.btn{height:32px;padding:0 12px;border-radius:7px;border:1px solid var(--line-2);background:var(--raise);font-size:12px;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn:hover{border-color:var(--fg-2)}
+.btn.pri{background:var(--accent);color:#03140c;border-color:var(--accent);font-weight:700}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.ghost{background:none}
+.btn.danger{color:var(--crit);border-color:rgba(255,75,92,.4);background:rgba(255,75,92,.06)}
+.btn.sm{height:24px;padding:0 9px;font-size:11px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.task-title{font-family:var(--f-display);font-size:19px;font-weight:600;letter-spacing:.02em}
+.task-sub{color:var(--fg-2);font-size:12px;margin-top:2px}
+.prog{height:6px;border-radius:999px;background:var(--panel);border:1px solid var(--line);margin:12px 0 10px;overflow:hidden}
+.prog-bar{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,rgba(56,225,220,.4),var(--accent));box-shadow:0 0 12px rgba(56,225,220,.6);transition:width .3s}
+.kv4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.kv4 span{display:block;font-size:10.5px;color:var(--muted)}
+.kv4 b{font-family:var(--f-mono);font-weight:500;font-size:14px}
+.steps{list-style:none;margin:12px 0;padding:0;display:flex;flex-direction:column;gap:0;counter-reset:st}
+.steps li{counter-increment:st;display:grid;grid-template-columns:20px 1fr auto;gap:9px;align-items:center;padding:4px 0;color:var(--muted);font-size:12px;position:relative}
+.steps li::before{content:counter(st);width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font:10px var(--f-mono);border:1px solid var(--line-2);background:var(--panel)}
+.steps li small{font-family:var(--f-mono);font-size:10px;color:var(--muted)}
+.steps li.done{color:var(--fg-2)}
+.steps li.done::before{content:"✓";color:var(--ok);border-color:rgba(53,212,138,.45)}
+.steps li.cur{color:var(--fg)}
+.steps li.cur::before{border-color:var(--accent);color:#03140c;background:var(--accent);box-shadow:0 0 10px rgba(56,225,220,.6)}
+.steps li.cur small{color:var(--accent)}
+.btn-row{display:flex;gap:6px}
+.btn-row .btn{flex:1}
+.empty{color:var(--muted);font-size:12px;line-height:1.6;padding:6px 0 10px}
+
+.procs{display:flex;flex-direction:column;gap:2px}
+.proc{display:grid;grid-template-columns:8px 1fr auto 52px;gap:10px;align-items:center;padding:7px 4px;border-radius:6px}
+.proc:hover{background:var(--panel)}
+.proc i{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.proc[data-s="run"] i{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+.proc[data-s="starting"] i,.proc[data-s="stopping"] i{background:var(--warn);animation:blink .6s steps(2) infinite}
+.proc .pn{font-size:12.5px}
+.proc .pn small{display:block;font-family:var(--f-mono);font-size:10px;color:var(--muted)}
+.proc .pm{font-family:var(--f-mono);font-size:10.5px;color:var(--muted);text-align:right;line-height:1.35}
+.proc .btn{width:52px;padding:0}
+.safety{margin-top:8px;padding-top:9px;border-top:1px dashed var(--line-2);display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--muted)}
+
+.loc3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px}
+.loc3 div{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:7px 8px}
+.loc3 span{display:block;font-size:10.5px;color:var(--muted)}
+.loc3 b{font-family:var(--f-mono);font-weight:500;font-size:15px}
+.loc3 b small{font-size:10px;color:var(--muted);font-weight:400;margin-left:2px}
+.spark{width:100%;height:46px;display:block}
+
+.arm{display:flex;align-items:center;gap:12px;padding:10px;border-radius:9px;border:1px solid var(--line);background:var(--panel);margin-bottom:12px}
+.arm-ico{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;flex:none}
+.arm[data-s="armed"] .arm-ico{background:rgba(53,212,138,.12);color:var(--ok)}
+.arm[data-s="locked"] .arm-ico{background:var(--raise);color:var(--fg-2)}
+.arm[data-s="estop"] .arm-ico{background:rgba(255,75,92,.12);color:var(--crit)}
+.arm-t{flex:1;min-width:0}
+.arm-t b{display:block;font-size:13px}
+.arm-t span{font-size:11px;color:var(--muted)}
+.sl{display:grid;grid-template-columns:62px 1fr 52px;gap:10px;align-items:center;margin:7px 0}
+.sl label{font-size:11.5px;color:var(--fg-2)}
+.sl output{font-family:var(--f-mono);font-size:11.5px;text-align:right}
+input[type=range]{width:100%;accent-color:var(--accent);height:4px}
+
+/* floating inspector + modal */
+.float{position:fixed;z-index:20;width:330px;border-radius:10px;background:rgba(10,17,27,.97);border:1px solid var(--line-2);box-shadow:0 20px 50px rgba(0,0,0,.55);backdrop-filter:blur(10px)}
+.float-h{display:flex;align-items:center;gap:8px;padding:9px 10px 9px 12px;border-bottom:1px solid var(--line);cursor:move;user-select:none}
+.float-h b{font-family:var(--f-mono);font-size:12px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.float-h span{font-family:var(--f-mono);font-size:10.5px;color:var(--muted)}
+.float pre{margin:0;padding:10px 12px;font:11.5px/1.6 var(--f-mono);color:var(--fg-2);max-height:300px;overflow:auto;white-space:pre}
+.float pre .key{color:var(--muted)}
+.float pre .num{color:var(--accent)}
+.scrim{position:fixed;inset:0;z-index:30;background:rgba(2,4,8,.6);display:grid;place-items:center;backdrop-filter:blur(3px)}
+.modal{width:min(420px,calc(100vw - 32px));border-radius:12px;background:var(--panel-2);border:1px solid var(--line-2);padding:18px 18px 14px;box-shadow:0 30px 60px rgba(0,0,0,.5)}
+.modal h3{margin:0 0 8px;font-size:15px}
+.modal p{margin:0 0 16px;color:var(--fg-2);line-height:1.65}
+.modal .btn-row{justify-content:flex-end}
+.modal .btn-row .btn{flex:none;min-width:84px}
+
+@media (max-width:1100px){
+  body{overflow:auto}
+  .app{height:auto;grid-template-rows:auto auto}
+  .top{flex-wrap:wrap;padding-block:8px}
+  .chips{flex-wrap:wrap;flex-basis:100%;order:3}
+  .main,body.demo .main{grid-template-columns:minmax(0,1fr)}
+  .stage{height:60vh}
+  .toolbar{max-width:calc(100% - 24px);overflow-x:auto}
+  .tool span{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+body{margin:0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header class="top panel">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="8" fill="#0f1b28" stroke="#22334a"/><path d="M8 19h16l-2-6H11z" fill="none" stroke="#38e1dc" stroke-width="1.8" stroke-linejoin="round"/><circle cx="10" cy="22.5" r="2.2" fill="#38e1dc"/><circle cx="22" cy="22.5" r="2.2" fill="#38e1dc"/><path d="M22 13l3-4" stroke="#38e1dc" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <div>
+        <div class="brand-name">GO2W<span>导航控制台</span></div>
+        <div class="brand-sub">NAV CONSOLE · <b>原型 · 模拟数据</b></div>
+      </div>
+    </div>
+    <div class="chips">
+      <div class="chip" id="chLink"><i></i><span class="k">链路</span><b>--</b></div>
+      <div class="chip" id="chLoc"><i></i><span class="k">定位</span><b>--</b></div>
+      <div class="chip" id="chOdom"><i></i><span class="k">里程计</span><b>--</b></div>
+      <div class="chip" id="chBase"><i></i><span class="k">底盘</span><b>--</b></div>
+      <div class="chip" id="chCpu"><i></i><span class="k">CPU</span><b>--</b></div>
+      <div class="chip" id="chMem"><i></i><span class="k">内存</span><b>--</b></div>
+      <div class="chip rec" id="chRec" hidden><i></i><span class="k">录包</span><b>00:00</b></div>
+    </div>
+    <div class="top-right">
+      <div class="seg" role="group" aria-label="界面模式">
+        <button id="mDebug" class="on">调试</button><button id="mDemo">演示</button>
+      </div>
+      <div class="clock" id="clock">--:--:--</div>
+      <button class="estop" id="estopBtn"><span class="estop-ring"></span>急停<kbd>Space</kbd></button>
+    </div>
+  </header>
+
+  <div class="main">
+    <!-- LEFT -->
+    <aside class="col left">
+      <section class="panel card">
+        <div class="robot">
+          <div class="robot-ico">
+            <svg width="46" height="34" viewBox="0 0 46 34" aria-hidden="true"><path d="M8 14h24l4-5h4" fill="none" stroke="#38e1dc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect x="7" y="11" width="26" height="8" rx="3" fill="rgba(56,225,220,.15)" stroke="#38e1dc" stroke-width="1.5"/><path d="M11 19l-2 7M29 19l2 7M15 19l1 7M25 19l-1 7" stroke="#9db0c7" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><circle cx="31" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><circle cx="16" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><circle cx="24" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><rect x="18" y="7" width="6" height="4" rx="1" fill="#ff4fa3"/></svg>
+          </div>
+          <div>
+            <div style="display:flex;align-items:center;gap:8px"><span class="robot-name">Go2W</span><span class="pill" id="robotPill" data-s="run">导航中</span></div>
+            <div class="robot-sub">扩展坞 Orin Nano 8GB · MID360</div>
+          </div>
+        </div>
+        <div class="stat4">
+          <div><span>电量</span><b id="sBat">76%</b></div>
+          <div><span>速度</span><b id="sSpd">0.00</b></div>
+          <div><span>今日里程</span><b id="sOdo">0 m</b></div>
+          <div><span>运行</span><b id="sUp">--</b></div>
+        </div>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>图层</h3><span class="meta" id="layerCount"></span></div>
+        <div class="layers" id="layers"></div>
+      </section>
+
+      <section class="panel card topics-card">
+        <div class="card-h"><h3>Topic</h3><span class="meta" id="topicCount"></span></div>
+        <input class="search" id="topicSearch" placeholder="筛选 topic…" autocomplete="off">
+        <div class="topics" id="topics"></div>
+      </section>
+    </aside>
+
+    <!-- CENTER -->
+    <main class="center">
+      <section class="stage" id="stage">
+        <canvas id="map"></canvas>
+        <div class="hud hud-tl">
+          <div class="title">地图 <b>lab_20261021</b> · 0.05 m</div>
+          <span class="k">位姿</span><span class="v" id="hPose">--</span>
+          <span class="k">速度</span><span class="v" id="hVel">--</span>
+          <span class="k">frame</span><span class="v">map → base_footprint</span>
+        </div>
+        <div class="hud hud-tr">
+          <button class="ib" id="vFollow" title="跟随机器人 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
+          <button class="ib" id="vFit" title="适配地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+          <button class="ib" id="vIn" title="放大"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="ib" id="vOut" title="缩小"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14"/></svg></button>
+        </div>
+        <div class="mode-tag" id="mapTag" hidden>建图中 · slam_toolbox</div>
+        <div class="tele" id="teleHint" hidden>
+          <div class="keys"><kbd data-k="q">Q</kbd><kbd data-k="w">W</kbd><kbd data-k="e">E</kbd><kbd data-k="a">A</kbd><kbd data-k="s">S</kbd><kbd data-k="d">D</kbd></div>
+          <div><b>键盘遥控</b><div style="color:var(--muted);font-size:11px;margin-top:2px">按住移动，松开即停 · W/S 前后 · A/D 转向 · Q/E 横移</div></div>
+        </div>
+        <div class="toolbar" id="toolbar">
+          <button class="tool" data-tool="pan" title="选择 / 平移"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M5 3l14 8-6 2-2 6z"/></svg><span>平移</span><kbd>1</kbd></button>
+          <button class="tool" data-tool="init" title="设置初始位姿：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="7"/><path d="M12 12l5-5M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><span>初始位姿</span><kbd>2</kbd></button>
+          <button class="tool" data-tool="goal" title="导航目标：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 21V4h10l-2 4 2 4H6"/></svg><span>导航目标</span><kbd>3</kbd></button>
+          <button class="tool" data-tool="A" title="巡逻点 A"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6-6.2-6-11a6 6 0 0112 0c0 4.8-6 11-6 11z"/><path d="M10 12l2-5 2 5M10.7 10.5h2.6"/></svg><span>A 点</span><kbd>4</kbd></button>
+          <button class="tool" data-tool="B" title="巡逻点 B"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6-6.2-6-11a6 6 0 0112 0c0 4.8-6 11-6 11z"/><path d="M10.5 7h2.2a1.4 1.4 0 010 2.8h-2.2zM10.5 9.8h2.6a1.4 1.4 0 010 2.8h-2.6z"/></svg><span>B 点</span><kbd>5</kbd></button>
+          <button class="tool" data-tool="measure" title="测距"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg><span>测距</span><kbd>6</kbd></button>
+          <div class="tsep"></div>
+          <button class="tool" data-tool="teleop" title="键盘遥控"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10.5v4M5 12.5h4"/><circle cx="16" cy="11.5" r="1"/><circle cx="18" cy="13.5" r="1"/></svg><span>遥控</span><kbd>T</kbd></button>
+        </div>
+        <div class="hud hud-bl">
+          <div class="scale"><div class="scale-bar" id="scaleBar"></div><span id="scaleTxt">1 m</span></div>
+          <div class="cursor" id="cursor">x <b>--</b>  y <b>--</b>  cost <b>--</b></div>
+        </div>
+        <div class="hud hud-br">
+          <div class="lg"><span style="background:var(--accent)"></span>全局路径</div>
+          <div class="lg"><span style="background:var(--traj)"></span>局部轨迹</div>
+          <div class="lg"><span style="background:#fff"></span>激光</div>
+          <div class="lg"><span class="grad"></span>点云 0.3 → 1.6 m</div>
+        </div>
+        <div class="toast" id="toast"><i>✓</i><span></span></div>
+        <div class="banner" id="estopBanner" hidden>
+          <div class="banner-box">
+            <h2>急停已触发</h2>
+            <p>已发送 StopMove，底盘已锁定。解除后需要重新解锁才能运动。</p>
+            <button class="btn" id="estopRelease">解除急停</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel drawer" id="drawer">
+        <div class="dh">
+          <button class="dtab on" data-pane="pLogs">日志</button>
+          <button class="dtab" data-pane="pPlots">曲线</button>
+          <button class="dtab" data-pane="pMaps">地图与录包</button>
+          <div class="sp"></div>
+          <div id="logFilters" style="display:flex;gap:4px">
+            <button class="fchip on" data-lv="ALL">全部</button><button class="fchip" data-lv="INFO">INFO</button><button class="fchip" data-lv="WARN">WARN</button><button class="fchip" data-lv="ERROR">ERROR</button>
+          </div>
+          <button class="ib" id="drawerToggle" title="收起 / 展开" style="width:28px;height:28px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 9l6 6 6-6"/></svg></button>
+        </div>
+        <div class="db">
+          <div class="dpane logs" id="pLogs"></div>
+          <div class="dpane" id="pPlots" hidden>
+            <div class="plots">
+              <div class="plot-side" id="plotSide">
+                <button class="on" data-m="v">线速度 vx</button>
+                <button data-m="w">角速度 wz</button>
+                <button data-m="tilt">姿态 roll / pitch</button>
+                <button data-m="loc">定位匹配率</button>
+              </div>
+              <div class="plot-wrap"><canvas id="plot"></canvas></div>
+            </div>
+          </div>
+          <div class="dpane" id="pMaps" hidden>
+            <div class="mb">
+              <div>
+                <h4>地图 <span class="mono" style="color:var(--muted);font-size:11px">data/maps</span></h4>
+                <div class="inrow"><input id="mapName" value="lab_20261030"><button class="btn sm" id="saveMap">保存当前地图</button></div>
+                <div id="mapList"></div>
+              </div>
+              <div>
+                <h4>录包 <span class="mono" style="color:var(--muted);font-size:11px">data/bags</span></h4>
+                <div class="inrow"><input id="bagTopics" value="/scan /odom /tf /plan /cmd_vel /lowstate"><button class="btn sm" id="bagBtn">开始录包</button></div>
+                <div id="bagList"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- RIGHT -->
+    <aside class="col right">
+      <section class="panel card" id="taskCard">
+        <div class="card-h"><h3>导航任务</h3><span class="pill" id="taskPill">--</span></div>
+        <div id="taskBody">
+          <div class="task-title" id="taskTitle">--</div>
+          <div class="task-sub" id="taskSub">--</div>
+          <div class="prog"><div class="prog-bar" id="progBar"></div></div>
+          <div class="kv4">
+            <div><span>剩余</span><b id="tRem">--</b></div>
+            <div><span>预计</span><b id="tEta">--</b></div>
+            <div><span>用时</span><b id="tEl">--</b></div>
+            <div><span>恢复</span><b id="tRec">0</b></div>
+          </div>
+          <ol class="steps" id="steps">
+            <li data-p="plan">规划路径<small>Theta*</small></li>
+            <li data-p="align">原地对准<small>RotationShim</small></li>
+            <li data-p="follow">跟随路径<small>MPPI</small></li>
+            <li data-p="final">终点朝向对准<small>goal yaw</small></li>
+            <li data-p="arrive">到达<small id="arriveNote">停留 1 s</small></li>
+          </ol>
+        </div>
+        <div class="empty" id="taskEmpty" hidden>当前没有任务。在地图上用「导航目标」点选一个位置，或者设置好 A、B 点后开始巡逻。</div>
+        <div class="btn-row">
+          <button class="btn" id="btnPause">暂停</button>
+          <button class="btn danger" id="btnCancel">取消</button>
+          <button class="btn pri" id="btnPatrol">开始巡逻</button>
+        </div>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>运行档位</h3><span class="meta">go2w_humble</span></div>
+        <div class="procs" id="procs"></div>
+        <div class="safety debug-only"><span>安全测试：网页断线 3 s，底盘应自动停车并锁定</span><button class="btn sm ghost" id="simDrop">模拟断线</button></div>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>定位质量</h3><span class="meta">AMCL · Omni</span></div>
+        <div class="loc3">
+          <div><span>位置 σ</span><b id="lStd">--</b></div>
+          <div><span>航向 σ</span><b id="lYaw">--</b></div>
+          <div><span>匹配率</span><b id="lMatch">--</b></div>
+        </div>
+        <canvas class="spark" id="spark"></canvas>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>底盘控制</h3><span class="meta">go2w_cmd_bridge</span></div>
+        <div class="arm" id="armBox" data-s="armed">
+          <div class="arm-ico" id="armIco"></div>
+          <div class="arm-t"><b id="armT">已解锁</b><span id="armS">执行 /cmd_vel · 超时 0.3 s 自动停车</span></div>
+          <button class="btn sm" id="armBtn">锁定</button>
+        </div>
+        <div class="sl"><label for="slV">最大 vx</label><input type="range" id="slV" min="0.1" max="0.6" step="0.05" value="0.45"><output id="oV">0.45 m/s</output></div>
+        <div class="sl"><label for="slW">最大 wz</label><input type="range" id="slW" min="0.2" max="1.5" step="0.1" value="1.2"><output id="oW">1.2 rad/s</output></div>
+        <div class="sl debug-only"><label for="slT">指令超时</label><input type="range" id="slT" min="0.1" max="1" step="0.1" value="0.3"><output id="oT">0.3 s</output></div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+const deg = r => r * 180 / Math.PI;
+const fmt = (v, n = 2) => (v >= 0 ? ' ' : '') + v.toFixed(n);
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd = mulberry32(20261030);
+const gauss = () => { let u = 0; while (!u) u = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * Math.random()); };
+const ACC = '#38e1dc', TRAJ = '#b28cff', CLOUD = ['#ff4fa3','#e95ab9','#c964d6','#a86bff','#8a8fff','#6fb6ff'];
+
+/* ======================= sample map (lab, 24 × 16 m @ 0.05) ======================= */
+const RES = 0.05, MW = 24, MH = 16, GW = Math.round(MW / RES), GH = Math.round(MH / RES);
+const occ = new Uint8Array(GW * GH); // 0 free, 1 occupied, 2 unknown
+const WALLS = [[0,0,24,.15],[0,15.85,24,16],[0,0,.15,16],[23.85,0,24,16],
+  [9,0,9.15,5.5],[9,7,9.15,16],[9,10,16,10.15],[17.4,10,24,10.15],[16.5,0,16.65,3],[16.5,4.4,16.65,8.6]];
+const OBST = [[1.8,1.8,4.4,3],[1.8,6.2,4.4,7.4],[5.2,11.2,8,12.4],[.15,13.4,1.3,15.85],[12,3.8,12.5,4.3],[12,7.2,12.5,7.7],
+  [19,1,23.4,1.6],[19,4,23.4,4.6],[19,7,23.4,7.6],[10.8,12.6,13.6,14.2],[19.6,12.2,21.2,14.6],[14.2,14.8,16.4,15.85]];
+function cells(x0, y0, x1, y1){ return [Math.round(x0/RES), Math.round(y0/RES), Math.max(Math.round(x0/RES)+1, Math.round(x1/RES)), Math.max(Math.round(y0/RES)+1, Math.round(y1/RES))]; }
+for (const r of WALLS){ const [a,b,c,d] = cells(...r); for (let y=b;y<d;y++) for (let x=a;x<c;x++) occ[y*GW+x] = 1; }
+for (const r of OBST){ const [a,b,c,d] = cells(...r);
+  for (let y=b;y<d;y++) for (let x=a;x<c;x++) occ[y*GW+x] = (x<a+2||x>=c-2||y<b+2||y>=d-2) ? 1 : 2; }
+{ // edge speckle so it looks like a scanned map
+  const add = [];
+  for (let y=1;y<GH-1;y++) for (let x=1;x<GW-1;x++){ const i=y*GW+x; if (occ[i]) continue;
+    if ((occ[i-1]===1||occ[i+1]===1||occ[i-GW]===1||occ[i+GW]===1) && rnd()<.14) add.push(i); }
+  for (const i of add) occ[i] = 1;
+}
+const mapCv = document.createElement('canvas'); mapCv.width = GW; mapCv.height = GH;
+{ const c = mapCv.getContext('2d'), im = c.createImageData(GW, GH);
+  for (let y=0;y<GH;y++) for (let x=0;x<GW;x++){ const v = occ[y*GW+x], p = ((GH-1-y)*GW+x)*4, n = rnd()*5;
+    const col = v===1 ? [90,206,214] : v===2 ? [7,11,17] : [13+n,23+n,34+n];
+    im.data[p]=col[0]; im.data[p+1]=col[1]; im.data[p+2]=col[2]; im.data[p+3]=255; }
+  c.putImageData(im, 0, 0); }
+
+/* ======================= costmap + planner (0.1 m grid) ======================= */
+const PR = 0.1, PW = GW/2, PH = GH/2;
+const cost = new Uint8Array(PW*PH), dist = new Float32Array(PW*PH);
+for (let y=0;y<PH;y++) for (let x=0;x<PW;x++){ const i0=(2*y)*GW+2*x;
+  dist[y*PW+x] = (occ[i0]||occ[i0+1]||occ[i0+GW]||occ[i0+GW+1]) ? 0 : 1e9; }
+for (let y=0;y<PH;y++) for (let x=0;x<PW;x++){ const i=y*PW+x; let d=dist[i];
+  if (x>0) d=Math.min(d,dist[i-1]+1); if (y>0){ d=Math.min(d,dist[i-PW]+1); if(x>0)d=Math.min(d,dist[i-PW-1]+1.414); if(x<PW-1)d=Math.min(d,dist[i-PW+1]+1.414);} dist[i]=d; }
+for (let y=PH-1;y>=0;y--) for (let x=PW-1;x>=0;x--){ const i=y*PW+x; let d=dist[i];
+  if (x<PW-1) d=Math.min(d,dist[i+1]+1); if (y<PH-1){ d=Math.min(d,dist[i+PW]+1); if(x<PW-1)d=Math.min(d,dist[i+PW+1]+1.414); if(x>0)d=Math.min(d,dist[i+PW-1]+1.414);} dist[i]=d; }
+const INSC = 0.22, INFL = 0.7;
+for (let i=0;i<PW*PH;i++){ const d = dist[i]*PR;
+  cost[i] = d<=0.001 ? 254 : d<INSC ? 253 : d<INFL ? Math.round(252*Math.exp(-2.5*(d-INSC))) : 0; }
+const costCv = document.createElement('canvas'); costCv.width = PW; costCv.height = PH;
+{ const c = costCv.getContext('2d'), im = c.createImageData(PW, PH);
+  for (let y=0;y<PH;y++) for (let x=0;x<PW;x++){ const v=cost[y*PW+x], p=((PH-1-y)*PW+x)*4; if (!v) continue;
+    const t = v/254; im.data[p]=Math.round(140+115*t); im.data[p+1]=Math.round(80*(1-t)+79*t*.4); im.data[p+2]=Math.round(255-92*t); im.data[p+3]=Math.round(v>=253 ? 150 : 25+110*t); }
+  c.putImageData(im, 0, 0); }
+const costAt = (x, y) => { const gx = x/PR|0, gy = y/PR|0; return (gx<0||gy<0||gx>=PW||gy>=PH) ? 254 : cost[gy*PW+gx]; };
+
+function astar(sx, sy, gx, gy){
+  const N = PW*PH, g = new Float32Array(N).fill(Infinity), came = new Int32Array(N).fill(-1), closed = new Uint8Array(N);
+  const s = sy*PW+sx, goal = gy*PW+gx, hf = [], hi = [];
+  const push = (f, i) => { hf.push(f); hi.push(i); let k = hf.length-1; while (k>0){ const p=(k-1)>>1; if (hf[p]<=hf[k]) break; [hf[p],hf[k]]=[hf[k],hf[p]]; [hi[p],hi[k]]=[hi[k],hi[p]]; k=p; } };
+  const pop = () => { const r = hi[0], lf = hf.pop(), li = hi.pop(); if (hf.length){ hf[0]=lf; hi[0]=li; let k=0; for(;;){ const l=2*k+1, rr=l+1; let m=k; if(l<hf.length&&hf[l]<hf[m])m=l; if(rr<hf.length&&hf[rr]<hf[m])m=rr; if(m===k)break; [hf[m],hf[k]]=[hf[k],hf[m]]; [hi[m],hi[k]]=[hi[k],hi[m]]; k=m; } } return r; };
+  g[s] = 0; push(0, s);
+  const D = [[1,0,1],[-1,0,1],[0,1,1],[0,-1,1],[1,1,1.414],[1,-1,1.414],[-1,1,1.414],[-1,-1,1.414]];
+  while (hf.length){ const i = pop(); if (closed[i]) continue; closed[i] = 1; if (i===goal) break;
+    const x = i%PW, y = (i/PW)|0;
+    for (const [dx,dy,l] of D){ const nx=x+dx, ny=y+dy; if (nx<0||ny<0||nx>=PW||ny>=PH) continue; const n=ny*PW+nx;
+      if (closed[n] || cost[n]>=253) continue; const ng = g[i] + l*(1+cost[n]/40);
+      if (ng<g[n]){ g[n]=ng; came[n]=i; push(ng+Math.hypot(gx-nx,gy-ny), n); } } }
+  if (came[goal]<0) return null;
+  const out = []; for (let i=goal;i!==-1;i=came[i]) out.push([(i%PW+.5)*PR, (((i/PW)|0)+.5)*PR]); return out.reverse();
+}
+function los(a, b){ const L = Math.hypot(b[0]-a[0], b[1]-a[1]), n = Math.ceil(L/.05);
+  for (let k=1;k<n;k++){ const t=k/n; if (costAt(a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t) > 90) return false; } return true; }
+function plan(from, to){
+  const sx = clamp(from.x/PR|0,0,PW-1), sy = clamp(from.y/PR|0,0,PH-1), gx = to.x/PR|0, gy = to.y/PR|0;
+  const t0 = performance.now(), raw = astar(sx, sy, gx, gy); if (!raw) return null;
+  raw[0] = [from.x, from.y]; raw[raw.length-1] = [to.x, to.y];
+  const key = [raw[0]]; let i = 0; // Theta*-style any-angle shortcut
+  while (i < raw.length-1){ let j = i+1; while (j+1<raw.length && los(raw[i], raw[j+1])) j++; key.push(raw[j]); i = j; }
+  const pts = [key[0]], s = [0];
+  for (let k=1;k<key.length;k++){ const a=key[k-1], b=key[k], L=Math.hypot(b[0]-a[0],b[1]-a[1]), n=Math.max(1,Math.ceil(L/.1));
+    for (let m=1;m<=n;m++){ const p=[a[0]+(b[0]-a[0])*m/n, a[1]+(b[1]-a[1])*m/n]; s.push(s[s.length-1]+L/n); pts.push(p); } }
+  return { pts, s, total: s[s.length-1], ms: performance.now()-t0, corners: key.length };
+}
+
+/* ======================= state ======================= */
+const S = { t: 0, armed: true, estop: false, link: true, linkMs: 23, vmax: .45, wmax: 1.2, tmo: .3,
+  locStd: .035, locYaw: 1.5, match: 91, follow: false, tool: 'pan', paused: false, odo: 1284, bat: 76, keys: {} };
+const R = { x: 5.6, y: 4.6, th: 0, v: 0, w: 0, vy: 0, cv: 0, cw: 0, cvy: 0, roll: 0, pitch: 0 };
+const patrol = { A: { x: 5.6, y: 4.6, th: Math.PI }, B: { x: 22.5, y: 11.2, th: 0 }, loops: 5 };
+let task = { type: 'idle', phase: 'idle' };
+let trail = [], scanHits = new Float32Array(0), cloud = [], mppi = [], localTraj = [], particles = new Float32Array(0);
+let measure = [], drag = null;
+const hist = { v: [], vo: [], w: [], wo: [], roll: [], pitch: [], match: [], std: [] };
+
+const PROCS = [
+  { id:'lidar', name:'雷达驱动', pkg:'livox_ros_driver2', deps:[], cpu:39, mem:180 },
+  { id:'odom', name:'里程计', pkg:'FAST-LIO · planar_odom', deps:['lidar'], cpu:31, mem:620 },
+  { id:'mapping', name:'建图', pkg:'slam_toolbox', deps:['odom'], conflicts:['loc'], cpu:48, mem:540 },
+  { id:'loc', name:'定位', pkg:'map_server · AMCL', deps:['odom'], conflicts:['mapping'], cpu:9, mem:140 },
+  { id:'nav', name:'导航', pkg:'Nav2 · cmd_bridge', deps:['loc'], cpu:21, mem:410 },
+  { id:'patrol', name:'巡逻', pkg:'patrol.py', deps:['nav'], cpu:1, mem:40 },
+  { id:'bag', name:'录包', pkg:'ros2 bag record', deps:[], cpu:6, mem:90 },
+];
+const P = Object.fromEntries(PROCS.map(p => [p.id, p]));
+for (const p of PROCS){ p.state = ['mapping','bag'].includes(p.id) ? 'stop' : 'run'; p.since = -[0,0,0,3600,2405,1310,0][PROCS.indexOf(p)] - 5420; }
+P.patrol.since = -380; P.nav.since = -2405; P.loc.since = -2410;
+const run = id => P[id].state === 'run';
+const odomOk = () => run('lidar') && run('odom') && S.link;
+const canMove = () => S.armed && !S.estop && run('nav') && odomOk();
+
+const TOPICS = [
+  ['/livox/lidar','livox_ros_driver2/CustomMsg',10,'lidar'], ['/livox/imu','sensor_msgs/Imu',200,'lidar'],
+  ['/cloud_registered_body','sensor_msgs/PointCloud2',10,'odom'], ['/scan','sensor_msgs/LaserScan',10,'odom'],
+  ['/odom','nav_msgs/Odometry',50,'odom'], ['/odom_healthy','std_msgs/Bool',2,'odom'], ['/tf','tf2_msgs/TFMessage',100,'odom'],
+  ['/lowstate','unitree_go/LowState',516,'robot',1], ['/map','nav_msgs/OccupancyGrid',0,'map'],
+  ['/amcl_pose','geometry_msgs/PoseWithCovarianceStamped',5,'loc'], ['/particle_cloud','nav2_msgs/ParticleCloud',5,'loc'],
+  ['/plan','nav_msgs/Path',1,'nav'], ['/local_plan','nav_msgs/Path',20,'nav'], ['/cmd_vel','geometry_msgs/Twist',20,'nav'],
+  ['/global_costmap/costmap','nav_msgs/OccupancyGrid',1,'nav'], ['/local_costmap/costmap','nav_msgs/OccupancyGrid',5,'nav'],
+  ['/patrol_pose','geometry_msgs/PoseStamped',0,'patrol'], ['/rosout','rcl_interfaces/Log',0,'robot'],
+];
+const topicAlive = src => src==='robot' ? S.link : src==='map' ? (run('loc')||run('mapping')) : run(src);
+
+const LAYERS = [
+  { id:'map', name:'栅格地图', topic:'/map', c:'#5acdd6', on:true, src:'map' },
+  { id:'gcost', name:'全局代价地图', topic:'/global_costmap/costmap', c:'#ff4fa3', on:false, src:'nav' },
+  { id:'lcost', name:'局部代价地图', topic:'/local_costmap · 5×5 m', c:'#c964d6', on:true, src:'nav' },
+  { id:'cloud', name:'点云（俯视投影）', topic:'/cloud_registered_body', c:'grad', on:true, src:'odom' },
+  { id:'scan', name:'激光', topic:'/scan', c:'#ffffff', on:true, src:'odom' },
+  { id:'plan', name:'全局路径', topic:'/plan', c:ACC, on:true, src:'nav' },
+  { id:'local', name:'局部轨迹', topic:'/local_plan', c:TRAJ, on:true, src:'nav' },
+  { id:'mppi', name:'MPPI 采样', topic:'controller_server · 600', c:'rgba(178,140,255,.5)', on:false, src:'nav' },
+  { id:'particles', name:'AMCL 粒子', topic:'/particle_cloud', c:'#ffe08a', on:false, src:'loc' },
+  { id:'trail', name:'里程轨迹', topic:'/odom', c:'#8aa0b8', on:true, src:'odom' },
+  { id:'rings', name:'测距环', topic:'1 / 2 / 4 m', c:'rgba(255,255,255,.4)', on:true, src:'robot' },
+  { id:'tf', name:'TF 坐标轴', topic:'map · base_link', c:'#ff6b6b', on:false, src:'odom' },
+];
+const L = Object.fromEntries(LAYERS.map(l => [l.id, l]));
+const on = id => L[id].on;
+
+/* ======================= logs ======================= */
+const logs = []; let logFilter = 'ALL';
+const tstr = (d = new Date()) => d.toTimeString().slice(0,8) + '.' + String(d.getMilliseconds()).padStart(3,'0');
+function log(level, node, msg){
+  logs.push({ t: tstr(), level, node, msg }); if (logs.length > 400) logs.shift();
+  if (logFilter==='ALL' || logFilter===level) appendLog(logs[logs.length-1]);
+}
+const logEl = $('#pLogs');
+function appendLog(l){
+  const r = document.createElement('div'); r.className = 'lrow ' + l.level;
+  r.innerHTML = `<span class="lt">${l.t}</span><span class="lv ${l.level}">${l.level}</span><span class="ln">[${l.node}]</span><span class="lm"></span>`;
+  r.lastChild.textContent = l.msg; logEl.appendChild(r);
+  while (logEl.children.length > 300) logEl.firstChild.remove();
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function renderLogs(){ logEl.textContent = ''; logs.filter(l => logFilter==='ALL'||l.level===logFilter).forEach(appendLog); }
+
+/* ======================= toast / modal ======================= */
+let toastT;
+function toast(msg, k = 'ok'){ const t = $('#toast'); t.dataset.k = k; t.querySelector('i').textContent = k==='ok' ? '✓' : '!'; t.querySelector('span').textContent = msg;
+  t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600); }
+function confirmBox({ title, body, ok = '确认', danger = false, onOk }){
+  const s = document.createElement('div'); s.className = 'scrim';
+  s.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3></h3><p></p><div class="btn-row"><button class="btn ghost" data-a="c">取消</button><button class="btn ${danger?'danger':'pri'}" data-a="o"></button></div></div>`;
+  s.querySelector('h3').textContent = title; s.querySelector('p').textContent = body; s.querySelector('[data-a=o]').textContent = ok;
+  const close = () => s.remove();
+  s.addEventListener('click', e => { const a = e.target.dataset.a; if (e.target===s || a==='c') close(); if (a==='o'){ close(); onOk && onOk(); } });
+  document.body.appendChild(s); s.querySelector('[data-a=o]').focus();
+}
+
+/* ======================= robot / task sim ======================= */
+function goalOf(){ return task.type==='patrol' ? patrol[task.leg] : task.goal; }
+function startPatrol(){
+  task = { type:'patrol', leg:'B', loop:1, phase:'plan', planAt:S.t+.35, t0:S.t, recov:0 };
+  log('INFO','patrol',`start A↔B patrol, ${patrol.loops} loops`);
+}
+function startGoal(g){
+  task = { type:'goal', goal:g, phase:'plan', planAt:S.t+.35, t0:S.t, recov:0 };
+  log('INFO','bt_navigator',`Begin navigating from (${R.x.toFixed(2)}, ${R.y.toFixed(2)}) to (${g.x.toFixed(2)}, ${g.y.toFixed(2)})`);
+}
+function cancelTask(reason){
+  if (task.type==='idle') return;
+  log('INFO','bt_navigator', reason || 'Goal canceled');
+  if (task.type==='patrol' && run('patrol')) log('INFO','patrol','patrol stopped');
+  task = { type:'idle', phase:'idle' }; S.paused = false;
+}
+function lock(reason){ if (!S.armed) return; S.armed = false; log('WARN','go2w_cmd_bridge',`StopMove sent, LOCKED (${reason})`); }
+
+function step(dt){
+  S.t += dt;
+  let tv = 0, tw = 0, tvy = 0;
+  if (task.phase==='plan' && S.t>=task.planAt){
+    const g = goalOf(), p = plan(R, g);
+    if (!p){ log('ERROR','planner_server','Failed to create a plan: no valid path'); toast('规划失败：找不到可行路径','err'); task = { type:'idle', phase:'idle' }; }
+    else { task.path = p; task.idx = 0; task.phase = 'align'; task.legT0 = S.t;
+      log('INFO','planner_server',`Theta*: ${p.pts.length} poses, ${p.total.toFixed(2)} m, ${p.corners} vertices (${p.ms.toFixed(1)} ms)`);
+      log('INFO','controller_server','Received a goal, begin computing control effort.'); }
+  }
+  const active = ['align','follow','final'].includes(task.phase);
+  if (active && !S.paused && canMove()){
+    const Pth = task.path, g = goalOf();
+    let best = task.idx, bd = 1e9;
+    for (let i=task.idx;i<Math.min(Pth.pts.length, task.idx+40);i++){ const d = Math.hypot(Pth.pts[i][0]-R.x, Pth.pts[i][1]-R.y); if (d<bd){ bd=d; best=i; } }
+    task.idx = best;
+    let la = best; while (la<Pth.pts.length-1 && Pth.s[la] < Pth.s[best]+.6) la++;
+    const lp = Pth.pts[la], err = wrap(Math.atan2(lp[1]-R.y, lp[0]-R.x) - R.th);
+    const dGoal = Math.hypot(g.x-R.x, g.y-R.y), rem = Pth.total - Pth.s[best];
+    if (task.phase==='align'){
+      tw = Math.sign(err)*Math.min(S.wmax*.75, Math.abs(err)*2.2+.15);
+      if (Math.abs(err) < .14) task.phase = 'follow';
+    } else if (task.phase==='follow'){
+      if (Math.abs(err) > .95 && dGoal > .5){ task.phase = 'align'; }
+      tv = Math.min(S.vmax, .12 + rem*.55) * Math.max(.2, Math.cos(err));
+      tw = clamp(2.4*err, -S.wmax, S.wmax);
+      if (dGoal < .12 || (rem < .12 && dGoal < .3)) task.phase = 'final';
+    } else {
+      const e2 = wrap(g.th - R.th); tw = clamp(1.6*e2, -S.wmax*.7, S.wmax*.7);
+      if (Math.abs(e2) < .04){ tw = 0; arrive(); }
+    }
+  }
+  if (task.phase==='dwell' && S.t>=task.dwellUntil){
+    if (task.leg==='B') task.leg = 'A'; else { task.leg = 'B'; task.loop++; }
+    if (task.loop > patrol.loops){ log('INFO','patrol','patrol finished'); toast('巡逻完成'); task = { type:'idle', phase:'idle' }; }
+    else { task.phase = 'plan'; task.planAt = S.t+.3; log('INFO','patrol',`leg ${task.leg==='B'?'A→B':'B→A'} (loop ${task.loop}/${patrol.loops})`); }
+  }
+  if (S.tool==='teleop' && canMove()){
+    const k = S.keys; tv = (k.w?.3:0) - (k.s?.2:0); tw = (k.a?.8:0) - (k.d?.8:0); tvy = (k.q?.15:0) - (k.e?.15:0);
+  }
+  R.cv = tv; R.cw = tw; R.cvy = tvy;
+  const av = 1.0*dt, aw = 2.0*dt;
+  R.v += clamp(tv - R.v, -av, av); R.w += clamp(tw - R.w, -aw, aw); R.vy += clamp(tvy - R.vy, -av, av);
+  if (!canMove()){ R.v *= Math.max(0, 1-dt*6); R.w *= Math.max(0, 1-dt*6); R.vy *= Math.max(0, 1-dt*6); }
+  const nx = R.x + (R.v*Math.cos(R.th) - R.vy*Math.sin(R.th))*dt, ny = R.y + (R.v*Math.sin(R.th) + R.vy*Math.cos(R.th))*dt;
+  if (costAt(nx, ny) < 253){ R.x = nx; R.y = ny; } else { R.v = 0; R.vy = 0; }
+  R.th = wrap(R.th + R.w*dt);
+  S.odo += Math.hypot(R.v, R.vy)*dt;
+  R.pitch = .9 + (tv - R.v)*3 + Math.sin(S.t*7)*.08; R.roll = -.4 + R.w*.6 + Math.sin(S.t*5.3)*.06;
+  const last = trail[trail.length-1];
+  if (!last || Math.hypot(last[0]-R.x, last[1]-R.y) > .08){ trail.push([R.x, R.y]); if (trail.length > 900) trail.shift(); }
+  if (run('loc')){
+    const tgt = .03 + .012*Math.abs(R.v) + .01*Math.abs(R.w);
+    S.locStd += (tgt - S.locStd)*Math.min(1, dt*.6); S.locYaw += ((1.3 + 1.1*Math.abs(R.w)) - S.locYaw)*Math.min(1, dt*.6);
+    S.match += ((93 - 5*Math.abs(R.w) - 40*Math.max(0, S.locStd-.05)) - S.match)*Math.min(1, dt*.8);
+  }
+}
+function arrive(){
+  const g = goalOf();
+  log('INFO','bt_navigator',`Goal succeeded (${(S.t-task.legT0).toFixed(1)} s)`);
+  if (task.type==='patrol'){ task.phase = 'dwell'; task.dwellUntil = S.t + 1.2; }
+  else { toast(`已到达目标 (${g.x.toFixed(2)}, ${g.y.toFixed(2)})`); task.phase = 'arrived'; task.doneAt = S.t; }
+}
+
+/* sensors */
+function sense(){
+  if (!odomOk()){ scanHits = new Float32Array(0); cloud = []; return; }
+  const ox = R.x + .187*Math.cos(R.th), oy = R.y + .187*Math.sin(R.th), out = [];
+  for (let i=0;i<360;i++){ const a = i*Math.PI/180, c = Math.cos(a), s = Math.sin(a); let r = .1;
+    while (r < 15){ const gx = (ox+c*r)/RES|0, gy = (oy+s*r)/RES|0; if (gx<0||gy<0||gx>=GW||gy>=GH){ r = 99; break; } if (occ[gy*GW+gx]===1) break; r += .04; }
+    if (r < 15){ const n = gauss()*.015; out.push(ox+c*(r+n), oy+s*(r+n), r); } }
+  scanHits = Float32Array.from(out);
+  cloud = CLOUD.map(() => []);
+  for (let k=0;k<scanHits.length;k+=3){ const r = scanHits[k+2]; if (r > 11) continue;
+    const reps = r < 5 ? 3 : 2;
+    for (let m=0;m<reps;m++){ const z = .3 + Math.random()*1.3, ci = Math.min(CLOUD.length-1, ((z-.3)/1.3*CLOUD.length)|0);
+      cloud[ci].push(scanHits[k] + gauss()*.03, scanHits[k+1] + gauss()*.03); } }
+}
+function rollout(v, w, T = 1.6){ const pts = []; let x = R.x, y = R.y, th = R.th; for (let t=0;t<T;t+=.08){ x += v*Math.cos(th)*.08; y += v*Math.sin(th)*.08; th += w*.08; pts.push(x, y); } return pts; }
+function controllerViz(){
+  const active = ['align','follow','final'].includes(task.phase) && canMove() && !S.paused;
+  if (!active && S.tool!=='teleop'){ mppi = []; localTraj = []; return; }
+  mppi = []; for (let k=0;k<26;k++) mppi.push(rollout(Math.max(0, R.cv + gauss()*.12), R.cw + gauss()*.35));
+  localTraj = rollout(R.cv || R.v, R.cw || R.w);
+}
+function amclViz(){
+  if (!run('loc')){ particles = new Float32Array(0); return; }
+  const n = 160, a = new Float32Array(n*3), sy = S.locYaw*Math.PI/180;
+  for (let i=0;i<n;i++){ a[i*3] = R.x + gauss()*S.locStd*1.6; a[i*3+1] = R.y + gauss()*S.locStd*1.6; a[i*3+2] = R.th + gauss()*sy*1.6; }
+  particles = a;
+}
+
+/* ======================= processes ======================= */
+function depsChain(id, acc = []){ for (const d of P[id].deps){ depsChain(d, acc); } if (!acc.includes(id)) acc.push(id); return acc; }
+function dependents(id, acc = []){ for (const p of PROCS) if (p.deps.includes(id) && !acc.includes(p.id)){ acc.push(p.id); dependents(p.id, acc); } return acc; }
+const names = ids => ids.map(i => P[i].name).join('、');
+function requestStart(id){
+  const chain = depsChain(id).filter(i => P[i].state!=='run');
+  const conflictRoots = chain.flatMap(i => P[i].conflicts||[]).filter(c => P[c].state==='run');
+  const toStop = [...new Set(conflictRoots.flatMap(c => [c, ...dependents(c)]))].filter(i => P[i].state==='run');
+  const go = () => { stopMany(toStop); setTimeout(() => startMany(chain), toStop.length ? 900 : 0); };
+  if (toStop.length) return confirmBox({ title:`启动「${P[id].name}」`, body:`「${P[id].name}」与「${names(conflictRoots)}」不能同时运行。将先停止：${names(toStop)}。`, ok:'停止并启动', danger:true, onOk:go });
+  if (chain.length > 1) return confirmBox({ title:`启动「${P[id].name}」`, body:`需要先启动依赖：${names(chain.slice(0,-1))}。将按顺序启动。`, ok:'全部启动', onOk:go });
+  go();
+}
+function startMany(ids){ ids.forEach((id, k) => { const p = P[id]; p.state = 'starting'; renderProcs();
+  setTimeout(() => { p.state = 'run'; p.since = S.t; log('INFO','launch',`[${p.pkg}] process started (pid ${4000+((Math.random()*5000)|0)})`); onProcChange(id, true); renderProcs(); }, 700 + k*700); }); }
+function stopMany(ids){ ids.slice().reverse().forEach(id => { const p = P[id]; p.state = 'stopping'; onProcChange(id, false);
+  setTimeout(() => { p.state = 'stop'; log('INFO','launch',`[${p.pkg}] process has finished cleanly`); renderProcs(); }, 600); }); renderProcs(); }
+function requestStop(id){
+  const ids = [id, ...dependents(id)].filter(i => P[i].state==='run');
+  const risky = ids.some(i => ['lidar','odom','loc','nav'].includes(i));
+  if (!risky) return stopMany(ids);
+  confirmBox({ title:`停止「${P[id].name}」`, body: ids.length>1 ? `依赖它的进程也会停止：${names(ids.slice(1))}。正在执行的任务会取消，底盘会锁定。` : '正在执行的任务会取消，底盘会锁定。', ok:'停止', danger:true, onOk:() => stopMany(ids) });
+}
+let bagT0 = 0;
+function onProcChange(id, up){
+  if (!up){
+    if (['lidar','odom'].includes(id)){ log('ERROR','planar_odom','FAST-LIO odometry gap > 0.5 s, /odom_healthy = false'); lock('odom unhealthy'); }
+    if (['loc','nav','lidar','odom'].includes(id)){ cancelTask('Goal canceled: navigation stack stopped'); lock('nav stopped'); }
+    if (id==='patrol' && task.type==='patrol') cancelTask('patrol stopped');
+    if (id==='bag'){ const d = S.t - bagT0; bags.unshift({ name:`go2w_${new Date().toTimeString().slice(0,5).replace(':','')}`, dur:d, size:d*4.6 }); renderBags(); toast(`录包已保存（${fmtDur(d)}）`); }
+  } else {
+    if (id==='patrol' && task.type!=='patrol') startPatrol();
+    if (id==='bag') bagT0 = S.t;
+    if (id==='loc'){ S.locStd = .35; S.locYaw = 12; S.match = 40; }
+  }
+}
+
+/* ======================= canvas ======================= */
+const cv = $('#map'), ctx = cv.getContext('2d'), stage = $('#stage');
+let W = 0, H = 0, DPR = 1; const view = { cx: MW/2, cy: MH/2, s: 40 };
+function resize(){ const r = stage.getBoundingClientRect(); DPR = window.devicePixelRatio||1; W = r.width; H = r.height; cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR); }
+function fit(){ view.s = Math.min(W/MW, (H-60)/MH)*.94; view.cx = MW/2; view.cy = MH/2 - 10/view.s; }
+const sx = x => W/2 + (x-view.cx)*view.s, sy = y => H/2 - (y-view.cy)*view.s;
+const wx = px => (px-W/2)/view.s + view.cx, wy = py => view.cy - (py-H/2)/view.s;
+
+function polyline(arr, step = 2){ ctx.beginPath(); for (let i=0;i<arr.length;i+=step){ const x = sx(arr[i]), y = sy(arr[i+1]); i ? ctx.lineTo(x,y) : ctx.moveTo(x,y); } }
+function drawPin(p, label, col){
+  const x = sx(p.x), y = sy(p.y);
+  ctx.save(); ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5;
+  ctx.globalAlpha = .25; ctx.beginPath(); ctx.arc(x, y, 10, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+  ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(-p.th)*20, y + Math.sin(-p.th)*20); ctx.stroke();
+  ctx.fillStyle = '#04070c'; ctx.strokeStyle = col; ctx.beginPath(); ctx.roundRect(x-9, y-32, 18, 18, 4); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = col; ctx.font = '600 11px "Chakra Petch",sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, x, y-23);
+  ctx.beginPath(); ctx.moveTo(x, y-14); ctx.lineTo(x, y-4); ctx.stroke(); ctx.restore();
+}
+function drawArrow(x0, y0, x1, y1, col){
+  ctx.save(); ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  const a = Math.atan2(y1-y0, x1-x0); ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x1-12*Math.cos(a-.45), y1-12*Math.sin(a-.45)); ctx.lineTo(x1-12*Math.cos(a+.45), y1-12*Math.sin(a+.45)); ctx.fill();
+  ctx.beginPath(); ctx.arc(x0, y0, 5, 0, 7); ctx.fill(); ctx.restore();
+}
+function draw(){
+  ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0,W,H);
+  const s = view.s;
+  // backdrop dot grid
+  ctx.fillStyle = 'rgba(120,150,180,.08)';
+  const g0x = Math.floor(wx(0)), g1x = Math.ceil(wx(W)), g0y = Math.floor(wy(H)), g1y = Math.ceil(wy(0));
+  if (s > 8) for (let x=g0x;x<=g1x;x++) for (let y=g0y;y<=g1y;y++) ctx.fillRect(sx(x)-1, sy(y)-1, 2, 2);
+  ctx.imageSmoothingEnabled = false;
+  if (on('map') && topicAlive('map')){
+    ctx.save(); ctx.shadowColor = 'rgba(56,225,220,.25)'; ctx.shadowBlur = 18; ctx.drawImage(mapCv, sx(0), sy(MH), MW*s, MH*s); ctx.restore();
+    if (s > 14){ ctx.strokeStyle = 'rgba(140,180,210,.05)'; ctx.lineWidth = 1; ctx.beginPath();
+      for (let x=0;x<=MW;x++){ ctx.moveTo(sx(x)+.5, sy(0)); ctx.lineTo(sx(x)+.5, sy(MH)); } for (let y=0;y<=MH;y++){ ctx.moveTo(sx(0), sy(y)+.5); ctx.lineTo(sx(MW), sy(y)+.5); } ctx.stroke(); }
+  }
+  if (on('gcost') && run('nav')){ ctx.globalAlpha = .55; ctx.drawImage(costCv, sx(0), sy(MH), MW*s, MH*s); ctx.globalAlpha = 1; }
+  if (on('lcost') && run('nav') && odomOk()){
+    const x0 = sx(R.x-2.5), y0 = sy(R.y+2.5), w = 5*s;
+    ctx.save(); ctx.beginPath(); ctx.rect(x0, y0, w, w); ctx.clip(); ctx.globalAlpha = .9; ctx.drawImage(costCv, sx(0), sy(MH), MW*s, MH*s); ctx.restore();
+    ctx.save(); ctx.strokeStyle = 'rgba(201,100,214,.55)'; ctx.setLineDash([4,4]); ctx.strokeRect(x0+.5, y0+.5, w, w); ctx.restore();
+  }
+  if (on('trail') && trail.length > 1){ ctx.strokeStyle = 'rgba(138,160,184,.35)'; ctx.lineWidth = 1.5; ctx.beginPath(); trail.forEach((p,i) => i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1]))); ctx.stroke(); }
+  if (on('cloud')){ const z = Math.max(1.6, .05*s); cloud.forEach((arr, ci) => { ctx.fillStyle = CLOUD[ci]; ctx.globalAlpha = .85;
+    for (let i=0;i<arr.length;i+=2) ctx.fillRect(sx(arr[i])-z/2, sy(arr[i+1])-z/2, z, z); }); ctx.globalAlpha = 1; }
+  if (on('scan')){ ctx.fillStyle = '#fff'; for (let i=0;i<scanHits.length;i+=3) ctx.fillRect(sx(scanHits[i])-1.2, sy(scanHits[i+1])-1.2, 2.4, 2.4); }
+  // paths
+  if (task.path && on('plan') && run('nav') && ['align','follow','final','dwell'].includes(task.phase)){
+    const pts = task.path.pts, k = task.phase==='dwell' ? pts.length-1 : task.idx;
+    ctx.save(); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(56,225,220,.22)'; ctx.lineWidth = 2; ctx.beginPath(); for (let i=0;i<=k;i++){ const x=sx(pts[i][0]), y=sy(pts[i][1]); i?ctx.lineTo(x,y):ctx.moveTo(x,y); } ctx.stroke();
+    ctx.strokeStyle = ACC; ctx.lineWidth = 2.5; ctx.shadowColor = ACC; ctx.shadowBlur = 10;
+    ctx.beginPath(); for (let i=k;i<pts.length;i++){ const x=sx(pts[i][0]), y=sy(pts[i][1]); i===k?ctx.moveTo(x,y):ctx.lineTo(x,y); } ctx.stroke(); ctx.restore();
+  }
+  if (on('mppi') && mppi.length){ ctx.strokeStyle = 'rgba(178,140,255,.22)'; ctx.lineWidth = 1; for (const m of mppi){ polyline(m); ctx.stroke(); } }
+  if (on('local') && localTraj.length){ ctx.save(); ctx.strokeStyle = TRAJ; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.shadowColor = TRAJ; ctx.shadowBlur = 8; polyline(localTraj); ctx.stroke(); ctx.restore(); }
+  if (on('particles')){ ctx.strokeStyle = 'rgba(255,224,138,.7)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let i=0;i<particles.length;i+=3){ const x = sx(particles[i]), y = sy(particles[i+1]), a = particles[i+2]; ctx.moveTo(x,y); ctx.lineTo(x+Math.cos(-a)*7, y+Math.sin(-a)*7); } ctx.stroke(); }
+  // markers
+  drawPin(patrol.A, 'A', '#f2f6fb'); drawPin(patrol.B, 'B', '#f2f6fb');
+  if (task.type==='goal' && task.phase!=='arrived'){ drawGoal(task.goal); }
+  drawRobot();
+  if (on('tf')) drawTF();
+  // measure
+  if (measure.length){ ctx.save(); ctx.strokeStyle = '#ffe08a'; ctx.fillStyle = '#ffe08a'; ctx.lineWidth = 1.5; ctx.setLineDash([5,4]);
+    const [a, b] = [measure[0], measure[1] || measure[0]];
+    ctx.beginPath(); ctx.moveTo(sx(a.x), sy(a.y)); ctx.lineTo(sx(b.x), sy(b.y)); ctx.stroke(); ctx.setLineDash([]);
+    for (const p of measure){ ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), 3.5, 0, 7); ctx.fill(); }
+    if (measure[1]){ const d = Math.hypot(b.x-a.x, b.y-a.y), mx = (sx(a.x)+sx(b.x))/2, my = (sy(a.y)+sy(b.y))/2, t = d.toFixed(2)+' m';
+      ctx.font = '500 12px "JetBrains Mono",monospace'; const tw = ctx.measureText(t).width + 14;
+      ctx.fillStyle = 'rgba(6,11,18,.9)'; ctx.beginPath(); ctx.roundRect(mx-tw/2, my-24, tw, 20, 5); ctx.fill();
+      ctx.fillStyle = '#ffe08a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(t, mx, my-14); }
+    ctx.restore(); }
+  if (drag && drag.moved){ const col = drag.tool==='init' ? '#6fb6ff' : drag.tool==='goal' ? ACC : '#f2f6fb'; drawArrow(drag.x0, drag.y0, drag.x1, drag.y1, col); }
+}
+function drawGoal(g){
+  const x = sx(g.x), y = sy(g.y), pulse = (S.t*1.4)%1;
+  ctx.save(); ctx.strokeStyle = ACC; ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 1-pulse; ctx.beginPath(); ctx.arc(x, y, 8+pulse*22, 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
+  ctx.beginPath(); ctx.arc(x, y, 8, 0, 7); ctx.stroke();
+  ctx.fillStyle = ACC; ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill();
+  ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x+Math.cos(-g.th)*22, y+Math.sin(-g.th)*22); ctx.stroke(); ctx.restore();
+}
+function drawRobot(){
+  const s = view.s, x = sx(R.x), y = sy(R.y);
+  if (on('rings')){ ctx.save(); ctx.strokeStyle = 'rgba(220,235,250,.22)'; ctx.lineWidth = 1; ctx.setLineDash([3,5]);
+    for (const r of [1,2,4]){ ctx.beginPath(); ctx.arc(x, y, r*s, 0, 7); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.fillStyle = 'rgba(220,235,250,.45)'; ctx.font = '10px "JetBrains Mono",monospace'; ctx.textAlign = 'left';
+    for (const r of [2,4]) ctx.fillText(r+' m', x + r*s*.707 + 3, y - r*s*.707 - 3); ctx.restore(); }
+  const col = S.estop ? '#ff4b5c' : canMove() ? ACC : '#9db0c7';
+  ctx.save(); ctx.translate(x, y);
+  const gl = ctx.createRadialGradient(0,0,0,0,0,Math.max(24,.9*s)); gl.addColorStop(0, col==='#ff4b5c' ? 'rgba(255,75,92,.35)' : 'rgba(56,225,220,.3)'); gl.addColorStop(1,'rgba(56,225,220,0)');
+  ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, Math.max(24,.9*s), 0, 7); ctx.fill();
+  ctx.rotate(-R.th);
+  const Lb = Math.max(22, .70*s), Wb = Math.max(14, .43*s);
+  ctx.fillStyle = col; for (const [a,b] of [[1,1],[1,-1],[-1,1],[-1,-1]]) ctx.fillRect(a*Lb*.36 - Lb*.1, b*(Wb/2+2) - 2.5, Lb*.2, 5);
+  ctx.fillStyle = 'rgba(8,16,26,.92)'; ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.roundRect(-Lb/2, -Wb/2, Lb, Wb, 4); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(Lb/2-2, 0); ctx.lineTo(Lb*.1, -Wb*.32); ctx.lineTo(Lb*.1, Wb*.32); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ff4fa3'; ctx.fillRect(Lb*.2, -2.5, 5, 5); // MID360
+  ctx.restore();
+}
+function drawTF(){
+  const ax = (x, y, th, len, lbl) => { const X = sx(x), Y = sy(y); ctx.lineWidth = 2;
+    ctx.strokeStyle = '#ff6b6b'; ctx.beginPath(); ctx.moveTo(X,Y); ctx.lineTo(X+Math.cos(-th)*len, Y+Math.sin(-th)*len); ctx.stroke();
+    ctx.strokeStyle = '#5be08d'; ctx.beginPath(); ctx.moveTo(X,Y); ctx.lineTo(X+Math.cos(-th-Math.PI/2)*len, Y+Math.sin(-th-Math.PI/2)*len); ctx.stroke();
+    ctx.fillStyle = 'rgba(220,235,250,.7)'; ctx.font = '10px "JetBrains Mono",monospace'; ctx.textAlign='left'; ctx.fillText(lbl, X+5, Y+13); };
+  ax(0, 0, 0, 30, 'map'); ax(R.x, R.y, R.th, 24, 'base_link');
+}
+
+/* pointer */
+const TOOLS = ['pan','init','goal','A','B','measure','teleop'];
+function setTool(t){
+  if (t==='teleop' && S.tool!=='teleop'){
+    if (!canMove()){ toast(S.estop ? '急停中，无法遥控' : !S.armed ? '底盘已锁定，先解锁再遥控' : '导航或里程计未运行', 'err'); return; }
+    if (task.type!=='idle'){ cancelTask('Goal canceled: manual teleop'); toast('已取消当前任务，进入键盘遥控','warn'); }
+  }
+  if (S.tool==='teleop' && t!=='teleop'){ S.keys = {}; }
+  S.tool = t; $$('.tool').forEach(b => b.classList.toggle('on', b.dataset.tool===t));
+  $('#teleHint').hidden = t!=='teleop'; if (t!=='measure') measure = [];
+  cv.style.cursor = t==='pan' ? 'grab' : t==='teleop' ? 'default' : 'crosshair';
+}
+cv.addEventListener('pointerdown', e => {
+  const r = cv.getBoundingClientRect(), px = e.clientX-r.left, py = e.clientY-r.top; cv.setPointerCapture(e.pointerId);
+  if (S.tool==='pan' || S.tool==='teleop' || e.button===1){ drag = { tool:'pan', px, py, cx:view.cx, cy:view.cy }; cv.style.cursor = 'grabbing'; S.follow = false; $('#vFollow').classList.remove('on'); return; }
+  if (S.tool==='measure'){ const p = { x:wx(px), y:wy(py) }; measure = measure.length>=2 ? [p] : [...measure, p]; return; }
+  drag = { tool:S.tool, x0:px, y0:py, x1:px, y1:py, moved:false };
+});
+cv.addEventListener('pointermove', e => {
+  const r = cv.getBoundingClientRect(), px = e.clientX-r.left, py = e.clientY-r.top, x = wx(px), y = wy(py);
+  const inMap = x>=0 && y>=0 && x<MW && y<MH;
+  $('#cursor').innerHTML = inMap ? `x <b>${x.toFixed(2)}</b>  y <b>${y.toFixed(2)}</b>  cost <b>${costAt(x,y)}</b>` : 'x <b>--</b>  y <b>--</b>  cost <b>--</b>';
+  if (!drag) return;
+  if (drag.tool==='pan'){ view.cx = drag.cx - (px-drag.px)/view.s; view.cy = drag.cy + (py-drag.py)/view.s; return; }
+  drag.x1 = px; drag.y1 = py; if (Math.hypot(px-drag.x0, py-drag.y0) > 6) drag.moved = true;
+});
+cv.addEventListener('pointerup', () => {
+  if (!drag) return; const d = drag; drag = null;
+  if (d.tool==='pan'){ cv.style.cursor = S.tool==='pan' ? 'grab' : 'default'; return; }
+  const x = wx(d.x0), y = wy(d.y0), th = d.moved ? Math.atan2(-(d.y1-d.y0), d.x1-d.x0) : R.th;
+  if (x<0||y<0||x>=MW||y>=MH){ toast('位置在地图范围之外','err'); return; }
+  if (d.tool==='init'){
+    if (!run('loc')){ toast('定位未运行，无法设置初始位姿','err'); return; }
+    if (costAt(x,y) >= 253){ toast('该位置在障碍物上','err'); return; }
+    cancelTask('Goal canceled: initial pose reset'); R.x = x; R.y = y; R.th = th; R.v = R.w = 0; trail = [];
+    S.locStd = .4; S.locYaw = 14; S.match = 38; amclViz();
+    log('INFO','amcl',`Setting pose: ${x.toFixed(3)} ${y.toFixed(3)} ${th.toFixed(3)}`); toast('初始位姿已发布，粒子收敛中'); return;
+  }
+  if (costAt(x,y) >= 253){ toast('目标在障碍物或膨胀区内，请换个位置','err'); return; }
+  if (d.tool==='goal'){
+    if (!run('nav')){ toast('导航未运行：先在「运行档位」里启动导航','err'); return; }
+    if (task.type==='patrol') stopPatrolProc();
+    startGoal({ x, y, th }); toast(S.armed ? '目标已下发' : '目标已下发，底盘锁定中，解锁后开始运动', S.armed ? 'ok' : 'warn');
+  } else { patrol[d.tool] = { x, y, th }; log('INFO','patrol',`point ${d.tool} set to (${x.toFixed(2)}, ${y.toFixed(2)}, ${deg(th).toFixed(0)}°)`); toast(`巡逻点 ${d.tool} 已更新`);
+    if (task.type==='patrol'){ task.phase = 'plan'; task.planAt = S.t+.2; } }
+});
+cv.addEventListener('wheel', e => { e.preventDefault(); const r = cv.getBoundingClientRect(), px = e.clientX-r.left, py = e.clientY-r.top, x = wx(px), y = wy(py);
+  view.s = clamp(view.s * Math.exp(-e.deltaY*.0015), 8, 400); view.cx = x - (px-W/2)/view.s; view.cy = y + (py-H/2)/view.s; }, { passive:false });
+function stopPatrolProc(){ if (run('patrol')){ P.patrol.state = 'stop'; log('INFO','launch','[patrol.py] process has finished cleanly'); renderProcs(); } }
+
+/* ======================= UI panels ======================= */
+function renderLayers(){
+  $('#layers').innerHTML = LAYERS.map(l => `<div class="layer"><span class="sw" style="background:${l.c==='grad'?'linear-gradient(135deg,#ff4fa3,#6fb6ff)':l.c}"></span>
+    <div class="nm">${l.name}<small>${l.topic}</small></div><span class="hz" data-src="${l.src}"></span>
+    <button class="tg" role="switch" aria-label="${l.name}" aria-checked="${l.on}" data-l="${l.id}"></button></div>`).join('');
+  $('#layerCount').textContent = `${LAYERS.filter(l => l.on).length}/${LAYERS.length}`;
+}
+$('#layers').addEventListener('click', e => { const b = e.target.closest('[data-l]'); if (!b) return; L[b.dataset.l].on = !L[b.dataset.l].on; renderLayers(); });
+
+function renderTopics(){
+  const q = $('#topicSearch').value.trim().toLowerCase();
+  const list = TOPICS.filter(t => !q || t[0].includes(q) || t[1].toLowerCase().includes(q));
+  $('#topics').innerHTML = list.map(([n, ty, hz, src, d0]) => { const alive = topicAlive(src);
+    const shown = !alive ? '—' : hz===0 ? 'latched' : (hz*(1+gauss()*.02)).toFixed(hz>=100?0:1)+' Hz';
+    return `<button class="topic ${alive?'':'off'}" data-t="${n}"><i></i><span style="min-width:0"><span class="tn">${n}${d0?'<span class="dom0">domain 0</span>':''}</span><span class="tt">${ty}</span></span><span class="th">${shown}</span></button>`; }).join('');
+  $('#topicCount').textContent = `${TOPICS.filter(t => topicAlive(t[3])).length} 在线 / ${TOPICS.length}`;
+}
+$('#topicSearch').addEventListener('input', renderTopics);
+$('#topics').addEventListener('click', e => { const b = e.target.closest('[data-t]'); if (b) openInspector(b.dataset.t); });
+
+const fmtDur = s => { s = Math.max(0, s|0); const h = s/3600|0, m = (s%3600)/60|0, ss = s%60; return h ? `${h}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}` : `${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`; };
+function renderProcs(){
+  $('#procs').innerHTML = PROCS.map(p => { const st = p.state, busy = st==='starting'||st==='stopping';
+    const meta = st==='run' ? `${fmtDur(S.t-p.since)}<br>${(p.cpu*(1+gauss()*.05)).toFixed(0)}% · ${p.mem} MB` : st==='starting' ? '启动中…' : st==='stopping' ? '停止中…' : '未运行';
+    return `<div class="proc" data-s="${st}"><i></i><div class="pn">${p.name}<small>${p.pkg}</small></div><div class="pm">${meta}</div>
+      <button class="btn sm ${st==='run'?'ghost':''}" data-p="${p.id}" ${busy?'disabled':''}>${st==='run'?'停止':'启动'}</button></div>`; }).join('');
+}
+$('#procs').addEventListener('click', e => { const b = e.target.closest('[data-p]'); if (!b) return; const id = b.dataset.p;
+  if (id==='patrol' && !run('patrol') && (task.type==='idle' || task.type==='goal')){ /* falls through to start */ }
+  P[id].state==='run' ? requestStop(id) : requestStart(id); });
+
+/* inspector */
+let inspN = 0;
+function msgFor(n){
+  const q = (k, v) => `<span class="key">${k}:</span> ${typeof v==='number' ? `<span class="num">${v}</span>` : v}`;
+  const yaw = R.th, now = (Date.now()/1000).toFixed(3);
+  switch (n){
+    case '/odom': return [q('header.stamp',now),q('header.frame_id','odom'),q('child_frame_id','base_footprint'),q('pose.position.x',+R.x.toFixed(3)),q('pose.position.y',+R.y.toFixed(3)),q('pose.orientation.z',+Math.sin(yaw/2).toFixed(4)),q('pose.orientation.w',+Math.cos(yaw/2).toFixed(4)),q('twist.linear.x',+R.v.toFixed(3)),q('twist.linear.y',+R.vy.toFixed(3)),q('twist.angular.z',+R.w.toFixed(3))];
+    case '/cmd_vel': return [q('linear.x',+R.cv.toFixed(3)),q('linear.y',+R.cvy.toFixed(3)),q('linear.z',0),q('angular.x',0),q('angular.y',0),q('angular.z',+R.cw.toFixed(3))];
+    case '/scan': return [q('header.frame_id','base_footprint'),q('angle_min',-3.1416),q('angle_max',3.1416),q('angle_increment',.01745),q('range_min',.1),q('range_max',15),q('ranges[]',`[${[...scanHits].filter((_,i)=>i%3===2).slice(0,5).map(v=>v.toFixed(2)).join(', ')}, …] (${scanHits.length/3})`)];
+    case '/amcl_pose': return [q('header.frame_id','map'),q('pose.pose.position.x',+R.x.toFixed(3)),q('pose.pose.position.y',+R.y.toFixed(3)),q('yaw (deg)',+deg(yaw).toFixed(1)),q('covariance[0]',+(S.locStd**2).toFixed(5)),q('covariance[35]',+((S.locYaw*Math.PI/180)**2).toFixed(5))];
+    case '/lowstate': return [q('imu_state.rpy[0]',+(R.roll*Math.PI/180).toFixed(4)),q('imu_state.rpy[1]',+(R.pitch*Math.PI/180).toFixed(4)),q('imu_state.rpy[2]',+yaw.toFixed(4)),q('bms_state.soc',S.bat),q('power_v',28.4),q('tick',(Date.now()%1e7))];
+    case '/odom_healthy': return [q('data', odomOk() ? 'true' : 'false')];
+    case '/plan': return task.path ? [q('header.frame_id','map'),q('poses[]',task.path.pts.length),q('length (m)',+task.path.total.toFixed(2)),q('vertices',task.path.corners)] : [q('poses[]',0)];
+    case '/map': return [q('info.resolution',.05),q('info.width',GW),q('info.height',GH),q('info.origin.position','[0.0, 0.0, 0.0]'),q('data[]',`${GW*GH} cells`)];
+    case '/cloud_registered_body': return [q('header.frame_id','body'),q('height',1),q('width',cloud.reduce((a,c)=>a+c.length/2,0)),q('fields','x y z intensity'),q('point_step',16),q('is_dense','true')];
+    default: return [q('type', (TOPICS.find(t=>t[0]===n)||[])[1]), '<span class="key">（原型：该 topic 的消息内容未模拟）</span>'];
+  }
+}
+function openInspector(n){
+  const t = TOPICS.find(x => x[0]===n), f = document.createElement('div'); f.className = 'float';
+  const k = inspN++ % 5; f.style.left = (window.innerWidth/2 - 160 + k*26) + 'px'; f.style.top = (120 + k*26) + 'px';
+  f.innerHTML = `<div class="float-h"><b>${n}</b><span>${t[1].split('/')[1]}</span><button class="ib" style="width:24px;height:24px" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div><pre></pre>`;
+  document.body.appendChild(f);
+  const pre = f.querySelector('pre'), upd = () => { pre.innerHTML = topicAlive(t[3]) ? msgFor(n).join('\n') : '<span class="key">（没有发布者：相关进程未运行）</span>'; };
+  upd(); const iv = setInterval(upd, 200);
+  f.querySelector('button').onclick = () => { clearInterval(iv); f.remove(); };
+  const h = f.querySelector('.float-h');
+  h.addEventListener('pointerdown', e => { if (e.target.closest('button')) return; const ox = e.clientX - f.offsetLeft, oy = e.clientY - f.offsetTop; h.setPointerCapture(e.pointerId);
+    const mv = ev => { f.style.left = clamp(ev.clientX-ox, 0, window.innerWidth-60)+'px'; f.style.top = clamp(ev.clientY-oy, 0, window.innerHeight-40)+'px'; };
+    const up = () => { h.removeEventListener('pointermove', mv); h.removeEventListener('pointerup', up); };
+    h.addEventListener('pointermove', mv); h.addEventListener('pointerup', up); });
+}
+
+/* maps & bags */
+const maps = [{ name:'lab_20261021', meta:'480×320 · 0.05 m', cur:true }, { name:'corridor_20261028', meta:'612×204 · 0.05 m' }, { name:'lab_20261018_old', meta:'470×318 · 0.05 m' }];
+const bags = [{ name:'s7_nav4_162403', dur:1840, size:8120 }, { name:'s7_nav1_114954', dur:612, size:2790 }];
+function renderMaps(){ $('#mapList').innerHTML = maps.map((m,i) => `<div class="mrow"><span class="mn">${m.name}</span><span class="mm">${m.meta}</span>${m.cur?'<span class="pill" data-s="run">当前</span>':`<button class="btn sm" data-m="${i}">加载</button>`}</div>`).join(''); }
+function renderBags(){ $('#bagList').innerHTML = bags.map(b => `<div class="mrow"><span class="mn">${b.name}</span><span class="mm">${fmtDur(b.dur)}</span><span class="mm">${b.size>1024?(b.size/1024).toFixed(1)+' GB':b.size.toFixed(0)+' MB'}</span></div>`).join(''); }
+$('#mapList').addEventListener('click', e => { const b = e.target.closest('[data-m]'); if (!b) return; const m = maps[+b.dataset.m];
+  confirmBox({ title:`加载地图 ${m.name}`, body:'map_server 会重新加载地图，AMCL 需要重新设置初始位姿，当前任务会取消。', ok:'加载', onOk:() => {
+    maps.forEach(x => x.cur = false); m.cur = true; renderMaps(); cancelTask('Goal canceled: map changed'); log('INFO','map_server',`Loading yaml file: data/maps/${m.name}.yaml`);
+    toast(`已加载 ${m.name}（原型中仍显示示例地图）`); } }); });
+$('#saveMap').onclick = () => { if (!run('mapping')){ toast('保存地图需要「建图」正在运行','err'); return; }
+  const n = $('#mapName').value.trim() || 'map'; maps.unshift({ name:n, meta:'480×320 · 0.05 m' }); renderMaps(); log('INFO','slam_toolbox',`Saved map to data/maps/${n}`); toast(`地图已保存：${n}`); };
+$('#bagBtn').onclick = () => run('bag') ? requestStop('bag') : requestStart('bag');
+
+/* task card */
+const PHASES = ['plan','align','follow','final','arrive'];
+function renderTask(){
+  const idle = task.type==='idle';
+  $('#taskBody').hidden = idle; $('#taskEmpty').hidden = !idle;
+  const pill = $('#taskPill');
+  let st = 'run', label = '执行中';
+  if (idle){ st = ''; label = '空闲'; }
+  else if (S.estop){ st = 'crit'; label = '急停'; }
+  else if (S.paused){ st = 'warn'; label = '已暂停'; }
+  else if (task.phase==='arrived'){ st = 'ok'; label = '已完成'; }
+  else if (!canMove() && task.phase!=='plan'){ st = 'warn'; label = !S.armed ? '等待解锁' : '底盘不可用'; }
+  pill.dataset.s = st; pill.textContent = label;
+  $('#btnPause').disabled = idle || task.phase==='arrived'; $('#btnPause').textContent = S.paused ? '继续' : '暂停';
+  $('#btnCancel').disabled = idle;
+  $('#btnPatrol').textContent = task.type==='patrol' ? '巡逻中' : '开始巡逻'; $('#btnPatrol').disabled = task.type==='patrol';
+  if (idle) return;
+  if (task.type==='patrol'){ $('#taskTitle').textContent = 'A ↔ B 巡逻'; $('#taskSub').textContent = `第 ${task.loop} / ${patrol.loops} 圈 · ${task.leg==='B'?'A → B':'B → A'}`; $('#arriveNote').textContent = '停留 1 s'; }
+  else { const g = task.goal; $('#taskTitle').textContent = '单点导航'; $('#taskSub').textContent = `目标 (${g.x.toFixed(2)}, ${g.y.toFixed(2)}) · ${deg(g.th).toFixed(0)}°`; $('#arriveNote').textContent = 'goal checker'; }
+  const p = task.path, ph = task.phase==='dwell' || task.phase==='arrived' ? 'arrive' : task.phase;
+  const rem = p ? (ph==='arrive' ? 0 : Math.max(0, p.total - p.s[task.idx||0])) : null;
+  $('#progBar').style.width = p ? (100*(1 - rem/p.total)).toFixed(1)+'%' : '0%';
+  $('#tRem').textContent = rem==null ? '--' : rem.toFixed(1)+' m';
+  $('#tEta').textContent = rem==null ? '--' : rem < .05 ? '0 s' : Math.ceil(rem/Math.max(.2, S.vmax*.8))+' s';
+  $('#tEl').textContent = fmtDur(S.t - (task.legT0 ?? task.t0)); $('#tRec').textContent = task.recov || 0;
+  const ci = PHASES.indexOf(ph);
+  $$('#steps li').forEach((li, i) => { li.className = i<ci ? 'done' : i===ci ? (ph==='arrive' ? 'done' : 'cur') : ''; });
+}
+$('#btnPause').onclick = () => { S.paused = !S.paused; log('INFO','bt_navigator', S.paused ? 'Navigation paused' : 'Navigation resumed'); };
+$('#btnCancel').onclick = () => { if (task.type==='patrol') stopPatrolProc(); cancelTask(); toast('任务已取消'); };
+$('#btnPatrol').onclick = () => { if (!run('nav')){ requestStart('patrol'); return; } if (!run('patrol')) requestStart('patrol'); else startPatrol(); };
+
+/* arm / sliders / estop */
+const ICON_LOCK = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>';
+const ICON_OPEN = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 017.5-2"/></svg>';
+function renderArm(){
+  const box = $('#armBox'), s = S.estop ? 'estop' : S.armed ? 'armed' : 'locked'; box.dataset.s = s;
+  $('#armIco').innerHTML = s==='armed' ? ICON_OPEN : ICON_LOCK;
+  $('#armT').textContent = s==='armed' ? '已解锁' : s==='estop' ? '急停锁定' : '已锁定';
+  $('#armS').textContent = s==='armed' ? `执行 /cmd_vel · 超时 ${S.tmo.toFixed(1)} s 自动停车` : s==='estop' ? '先解除急停' : '不执行任何速度指令';
+  const b = $('#armBtn'); b.textContent = S.armed ? '锁定' : '解锁'; b.className = 'btn sm ' + (S.armed ? '' : 'pri'); b.disabled = S.estop;
+}
+$('#armBtn').onclick = () => {
+  if (S.armed){ lock('manual'); toast('底盘已锁定'); return; }
+  if (!run('nav')){ toast('导航未运行，cmd_bridge 不在线','err'); return; }
+  if (!odomOk()){ toast('里程计不健康，不能解锁','err'); return; }
+  confirmBox({ title:'解锁底盘', body:'解锁后机器人会执行导航和遥控的速度指令。确认机器人周围没有人和障碍物。', ok:'解锁', onOk:() => { S.armed = true; log('INFO','go2w_cmd_bridge','ARMED'); toast('底盘已解锁'); } });
+};
+function bindSlider(id, out, key, unit, param){ const el = $(id); el.oninput = () => { S[key] = +el.value; $(out).textContent = `${(+el.value).toFixed(key==='vmax'?2:1)} ${unit}`; };
+  el.onchange = () => log('INFO','param',`ros2 param set /go2w_cmd_bridge ${param} ${(+el.value).toFixed(2)}`); }
+bindSlider('#slV','#oV','vmax','m/s','max_vx'); bindSlider('#slW','#oW','wmax','rad/s','max_wz'); bindSlider('#slT','#oT','tmo','s','cmd_timeout');
+function estop(){ if (S.estop) return; S.estop = true; S.armed = false; S.paused = true; R.v = R.w = R.vy = 0; S.keys = {};
+  log('ERROR','go2w_cmd_bridge','E-STOP from web console: StopMove sent, LOCKED'); $('#estopBanner').hidden = false; }
+$('#estopBtn').onclick = estop;
+$('#estopRelease').onclick = () => { S.estop = false; $('#estopBanner').hidden = true; log('INFO','go2w_cmd_bridge','E-STOP released (still LOCKED)'); toast('急停已解除，底盘仍处于锁定','warn'); };
+$('#simDrop').onclick = () => { if (!S.link) return; S.link = false; log('WARN','go2w_web','client heartbeat lost (> 1.0 s)');
+  setTimeout(() => { lock('web heartbeat lost'); }, 1000);
+  setTimeout(() => { S.link = true; log('INFO','go2w_web','client reconnected, chassis stays LOCKED'); toast('已重连，底盘保持锁定，需要手动解锁','warn'); }, 3000); };
+
+/* mode / drawer / view */
+$('#mDebug').onclick = () => { document.body.classList.remove('demo'); $('#mDebug').classList.add('on'); $('#mDemo').classList.remove('on'); setTimeout(() => { resize(); fit(); }, 30); };
+$('#mDemo').onclick = () => { document.body.classList.add('demo'); $('#mDemo').classList.add('on'); $('#mDebug').classList.remove('on'); setTimeout(() => { resize(); fit(); }, 30); };
+$$('.dtab').forEach(b => b.onclick = () => { $$('.dtab').forEach(x => x.classList.toggle('on', x===b)); $$('.dpane').forEach(p => p.hidden = p.id!==b.dataset.pane);
+  $('#logFilters').style.visibility = b.dataset.pane==='pLogs' ? 'visible' : 'hidden'; $('#drawer').classList.remove('collapsed'); });
+$('#logFilters').onclick = e => { const b = e.target.closest('[data-lv]'); if (!b) return; logFilter = b.dataset.lv; $$('#logFilters .fchip').forEach(x => x.classList.toggle('on', x===b)); renderLogs(); };
+$('#drawerToggle').onclick = () => $('#drawer').classList.toggle('collapsed');
+let plotM = 'v'; $('#plotSide').onclick = e => { const b = e.target.closest('[data-m]'); if (!b) return; plotM = b.dataset.m; $$('#plotSide button').forEach(x => x.classList.toggle('on', x===b)); };
+$('#vFollow').onclick = () => { S.follow = !S.follow; $('#vFollow').classList.toggle('on', S.follow); if (S.follow && view.s < 50) view.s = 60; };
+$('#vFit').onclick = () => { S.follow = false; $('#vFollow').classList.remove('on'); fit(); };
+$('#vIn').onclick = () => view.s = clamp(view.s*1.3, 8, 400);
+$('#vOut').onclick = () => view.s = clamp(view.s/1.3, 8, 400);
+$('#toolbar').onclick = e => { const b = e.target.closest('[data-tool]'); if (b) setTool(b.dataset.tool); };
+
+window.addEventListener('keydown', e => {
+  if (e.target.closest('input,select,textarea')) return;
+  const k = e.key.toLowerCase();
+  if (e.code==='Space'){ e.preventDefault(); estop(); return; }
+  if (S.tool==='teleop' && 'wasdqe'.includes(k) && k.length===1){ S.keys[k] = true; $$(`.keys kbd[data-k="${k}"]`).forEach(x => x.classList.add('dn')); return; }
+  if (k==='escape'){ setTool('pan'); return; }
+  const n = +k; if (n>=1 && n<=6) setTool(TOOLS[n-1]); if (k==='t') setTool(S.tool==='teleop' ? 'pan' : 'teleop'); if (k==='f') $('#vFollow').click();
+});
+window.addEventListener('keyup', e => { const k = e.key.toLowerCase(); if (S.keys[k]){ S.keys[k] = false; $$(`.keys kbd[data-k="${k}"]`).forEach(x => x.classList.remove('dn')); } });
+window.addEventListener('blur', () => { S.keys = {}; $$('.keys kbd').forEach(x => x.classList.remove('dn')); });
+
+/* chips, HUD, charts */
+function setChip(id, s, txt){ const c = $(id); c.dataset.s = s; c.querySelector('b').textContent = txt; }
+function renderChips(){
+  S.linkMs = clamp(S.linkMs + gauss()*2, 14, 48);
+  setChip('#chLink', S.link ? (S.linkMs>40?'warn':'ok') : 'crit', S.link ? `${S.linkMs.toFixed(0)} ms` : '断开');
+  setChip('#chLoc', !run('loc') ? (run('mapping')?'ok':'') : S.locStd>.15 ? 'warn' : 'ok', !run('loc') ? (run('mapping')?'建图':'未运行') : S.locStd>.15 ? '收敛中' : '良好');
+  setChip('#chOdom', odomOk() ? 'ok' : 'crit', odomOk() ? '健康' : '不可用');
+  setChip('#chBase', S.estop ? 'crit' : S.armed ? 'ok' : 'warn', S.estop ? '急停' : S.armed ? '已解锁' : '锁定');
+  const cpu = PROCS.filter(p => p.state==='run').reduce((a,p) => a+p.cpu, 0)/6 + 4 + gauss();
+  setChip('#chCpu', cpu>80?'crit':cpu>60?'warn':'ok', `${cpu.toFixed(0)}%`);
+  const mem = 1.3 + PROCS.filter(p => p.state==='run').reduce((a,p) => a+p.mem, 0)/1024;
+  setChip('#chMem', mem>6.5?'warn':'ok', `${mem.toFixed(1)} / 7.4 G`);
+  $('#chRec').hidden = !run('bag'); if (run('bag')) $('#chRec').querySelector('b').textContent = fmtDur(S.t - bagT0);
+  $('#mapTag').hidden = !run('mapping') || S.tool==='teleop';
+  const rp = $('#robotPill');
+  const rs = S.estop ? ['crit','急停'] : S.tool==='teleop' ? ['run','遥控中'] : run('mapping') ? ['run','建图中'] : task.type!=='idle' && task.phase!=='arrived' ? ['run','导航中'] : ['ok','待命'];
+  rp.dataset.s = rs[0]; rp.textContent = rs[1];
+  $('#sSpd').textContent = Math.hypot(R.v, R.vy).toFixed(2); $('#sOdo').textContent = `${S.odo.toFixed(0)} m`; $('#sUp').textContent = fmtDur(S.t + 5420).slice(0,-3) + 'h'.replace('h','');
+  if (run('loc')){ $('#lStd').innerHTML = `${S.locStd.toFixed(3)}<small>m</small>`; $('#lYaw').innerHTML = `${S.locYaw.toFixed(1)}<small>°</small>`; $('#lMatch').innerHTML = `${S.match.toFixed(0)}<small>%</small>`; }
+  else { $('#lStd').textContent = '--'; $('#lYaw').textContent = '--'; $('#lMatch').textContent = '--'; }
+}
+function renderHud(){
+  $('#hPose').textContent = `x ${fmt(R.x)}  y ${fmt(R.y)}  θ ${fmt(deg(R.th),1)}°`;
+  $('#hVel').textContent = `vx ${fmt(R.v)}  vy ${fmt(R.vy)}  wz ${fmt(R.w)}`;
+  const cands = [.5,1,2,5,10]; let m = cands.find(c => c*view.s >= 60) || 10;
+  $('#scaleBar').style.width = (m*view.s).toFixed(0)+'px'; $('#scaleTxt').textContent = m+' m';
+}
+function pushHist(){
+  const H = hist, cap = 300, p = (a, v) => { a.push(v); if (a.length > cap) a.shift(); };
+  p(H.v, R.cv); p(H.vo, R.v + gauss()*.008); p(H.w, R.cw); p(H.wo, R.w + gauss()*.02); p(H.roll, R.roll); p(H.pitch, R.pitch);
+  p(H.match, run('loc') ? S.match : null); p(H.std, run('loc') ? S.locStd : null);
+}
+function chart(canvas, series, opt){
+  const r = canvas.getBoundingClientRect(); if (!r.width) return; const d = window.devicePixelRatio||1;
+  if (canvas.width !== Math.round(r.width*d)){ canvas.width = Math.round(r.width*d); canvas.height = Math.round(r.height*d); }
+  const c = canvas.getContext('2d'); c.setTransform(d,0,0,d,0,0); c.clearRect(0,0,r.width,r.height);
+  const pl = opt.pad ? 44 : 2, pr = opt.pad ? 14 : 2, pt = opt.pad ? 14 : 4, pb = opt.pad ? 22 : 4, w = r.width-pl-pr, h = r.height-pt-pb;
+  const [lo, hi] = opt.range, Y = v => pt + h - (v-lo)/(hi-lo)*h, n = 300, X = i => pl + i/(n-1)*w;
+  if (opt.pad){ c.font = '10px "JetBrains Mono",monospace'; c.fillStyle = '#5f718a'; c.strokeStyle = 'rgba(140,170,200,.08)'; c.textAlign = 'right'; c.textBaseline = 'middle';
+    for (const t of opt.ticks){ c.beginPath(); c.moveTo(pl, Y(t)+.5); c.lineTo(pl+w, Y(t)+.5); c.stroke(); c.fillText(t.toFixed(opt.dec??1), pl-6, Y(t)); }
+    c.textAlign = 'center'; c.textBaseline = 'top'; for (const s of [-30,-20,-10,0]) c.fillText(s ? `${s} s` : '现在', pl + (1+s/30)*w, pt+h+6);
+    let lx = pl + 8; c.textAlign = 'left'; c.textBaseline = 'middle';
+    for (const s of series){ c.fillStyle = s.c; c.fillRect(lx, pt+4, 12, 3); c.fillStyle = '#9db0c7'; c.fillText(s.name, lx+16, pt+6); lx += c.measureText(s.name).width + 34; } }
+  for (const s of series){ const a = s.d, off = n - a.length; c.beginPath(); let started = false;
+    a.forEach((v, i) => { if (v==null){ started = false; return; } const x = X(i+off), y = Y(clamp(v, lo, hi)); started ? c.lineTo(x, y) : c.moveTo(x, y); started = true; });
+    c.strokeStyle = s.c; c.lineWidth = s.w || 1.6; c.setLineDash(s.dash || []); c.stroke(); c.setLineDash([]);
+    if (s.fill){ c.lineTo(X(n-1), pt+h); c.lineTo(X(off), pt+h); c.closePath(); const g = c.createLinearGradient(0, pt, 0, pt+h); g.addColorStop(0, s.fill); g.addColorStop(1, 'rgba(0,0,0,0)'); c.fillStyle = g; c.fill(); }
+    const lv = a[a.length-1]; if (lv!=null){ c.fillStyle = s.c; c.beginPath(); c.arc(X(n-1), Y(clamp(lv,lo,hi)), 2.8, 0, 7); c.fill(); } }
+}
+function renderCharts(){
+  chart($('#spark'), [{ d: hist.match, c: ACC, fill: 'rgba(56,225,220,.22)' }], { range: [30, 100] });
+  if ($('#pPlots').hidden || $('#drawer').classList.contains('collapsed') || document.body.classList.contains('demo')) return;
+  const cfg = {
+    v: [[{ d:hist.v, c:'#9db0c7', name:'cmd_vel.linear.x', dash:[4,3] }, { d:hist.vo, c:ACC, name:'odom.twist.linear.x', fill:'rgba(56,225,220,.12)' }], { range:[-.1,.6], ticks:[0,.2,.4,.6], dec:1 }],
+    w: [[{ d:hist.w, c:'#9db0c7', name:'cmd_vel.angular.z', dash:[4,3] }, { d:hist.wo, c:TRAJ, name:'odom.twist.angular.z' }], { range:[-1.5,1.5], ticks:[-1,0,1], dec:0 }],
+    tilt: [[{ d:hist.roll, c:'#ff6b6b', name:'roll (°)' }, { d:hist.pitch, c:'#5be08d', name:'pitch (°)' }], { range:[-3,3], ticks:[-2,0,2], dec:0 }],
+    loc: [[{ d:hist.match, c:ACC, name:'scan / map 匹配率 (%)', fill:'rgba(56,225,220,.12)' }], { range:[30,100], ticks:[40,60,80,100], dec:0 }],
+  }[plotM];
+  chart($('#plot'), cfg[0], { ...cfg[1], pad:true });
+}
+
+/* ======================= boot ======================= */
+const BOOT = [
+  ['INFO','launch','navigation.launch.py: all nodes started'], ['INFO','planar_odom','tilt_source = lowstate (domain 0, best-effort)'],
+  ['INFO','amcl','initialPoseReceived, particle cloud converged'], ['INFO','lifecycle_manager','Managed nodes are active'],
+  ['INFO','go2w_cmd_bridge','limits vx 0.45 m/s · wz 1.20 rad/s · timeout 0.30 s'], ['INFO','go2w_cmd_bridge','ARMED'],
+  ['WARN','controller_server','Control loop missed its desired rate of 20.0000 Hz (0.0538 s)'],
+];
+BOOT.forEach(b => log(...b));
+startPatrol();
+for (let i=0;i<300;i++){ step(.05); if (i%2===0) pushHist(); } // warm start: robot already on its way
+sense(); amclViz(); controllerViz();
+renderLayers(); renderTopics(); renderProcs(); renderMaps(); renderBags(); renderArm(); setTool('pan');
+resize(); fit();
+new ResizeObserver(() => resize()).observe(stage);
+
+const AMBIENT = [
+  ['INFO','controller_server','Passing new path to controller.'], ['INFO','amcl','Received a 360 X 2 laser scan'],
+  ['INFO','planar_odom','tilt roll -0.4° pitch 0.9°'], ['INFO','local_costmap','Cleared voxel layer around robot'],
+];
+let last = performance.now(), acc10 = 0, acc5 = 0, acc4 = 0, acc1 = 0, accLog = 0;
+function frame(now){
+  const dt = Math.min(.05, (now-last)/1000); last = now;
+  step(dt); acc10 += dt; acc5 += dt; acc4 += dt; acc1 += dt; accLog += dt;
+  if (acc10 >= .1){ acc10 = 0; sense(); controllerViz(); pushHist(); }
+  if (acc5 >= .2){ acc5 = 0; amclViz(); renderTask(); renderHud(); renderArm(); }
+  if (acc4 >= .25){ acc4 = 0; renderChips(); renderCharts(); }
+  if (acc1 >= 1){ acc1 = 0; renderTopics(); renderProcs(); $('#clock').textContent = new Date().toTimeString().slice(0,8); }
+  if (accLog >= 3.5){ accLog = 0; if (run('nav') && task.type!=='idle' && !S.paused && canMove()){ const a = AMBIENT[(Math.random()*AMBIENT.length)|0]; log(...a);
+      if (Math.random() < .08) log('WARN','controller_server','Control loop missed its desired rate of 20.0000 Hz (0.0512 s)'); } }
+  if (task.phase==='arrived' && S.t - task.doneAt > 4) task = { type:'idle', phase:'idle' };
+  if (S.follow){ view.cx += (R.x - view.cx)*Math.min(1, dt*4); view.cy += (R.y - view.cy)*Math.min(1, dt*4); }
+  draw(); requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

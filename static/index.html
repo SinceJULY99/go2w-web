@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go2W 导航控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="css/console.css">
+</head>
+<body>
+<div class="app">
+  <header class="top panel">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="8" fill="#0f1b28" stroke="#22334a"/><path d="M8 19h16l-2-6H11z" fill="none" stroke="#38e1dc" stroke-width="1.8" stroke-linejoin="round"/><circle cx="10" cy="22.5" r="2.2" fill="#38e1dc"/><circle cx="22" cy="22.5" r="2.2" fill="#38e1dc"/><path d="M22 13l3-4" stroke="#38e1dc" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <div>
+        <div class="brand-name">GO2W<span>导航控制台</span></div>
+        <div class="brand-sub">NAV CONSOLE · <b id="srcBadge">--</b></div>
+      </div>
+    </div>
+    <div class="chips">
+      <div class="chip" id="chLink"><i></i><span class="k">链路</span><b>--</b></div>
+      <div class="chip" id="chLoc"><i></i><span class="k">定位</span><b>--</b></div>
+      <div class="chip" id="chOdom"><i></i><span class="k">里程计</span><b>--</b></div>
+      <div class="chip" id="chBase"><i></i><span class="k">底盘</span><b>--</b></div>
+      <div class="chip" id="chCpu"><i></i><span class="k">CPU</span><b>--</b></div>
+      <div class="chip" id="chMem"><i></i><span class="k">内存</span><b>--</b></div>
+      <div class="chip rec" id="chRec" hidden><i></i><span class="k">录包</span><b>00:00</b></div>
+    </div>
+    <div class="top-right">
+      <div class="seg" role="group" aria-label="界面模式">
+        <button id="mDebug" class="on">调试</button><button id="mDemo">演示</button>
+      </div>
+      <div class="clock" id="clock">--:--:--</div>
+      <button class="estop" id="estopBtn"><span class="estop-ring"></span>急停<kbd>Space</kbd></button>
+    </div>
+  </header>
+
+  <div class="main">
+    <aside class="col left">
+      <section class="panel card">
+        <div class="robot">
+          <div class="robot-ico">
+            <svg width="46" height="34" viewBox="0 0 46 34" aria-hidden="true"><path d="M8 14h24l4-5h4" fill="none" stroke="#38e1dc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect x="7" y="11" width="26" height="8" rx="3" fill="rgba(56,225,220,.15)" stroke="#38e1dc" stroke-width="1.5"/><path d="M11 19l-2 7M29 19l2 7M15 19l1 7M25 19l-1 7" stroke="#9db0c7" stroke-width="1.6" stroke-linecap="round"/><circle cx="9" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><circle cx="31" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><circle cx="16" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><circle cx="24" cy="28" r="3" fill="none" stroke="#38e1dc" stroke-width="1.6"/><rect x="18" y="7" width="6" height="4" rx="1" fill="#ff4fa3"/></svg>
+          </div>
+          <div>
+            <div style="display:flex;align-items:center;gap:8px"><span class="robot-name">Go2W</span><span class="pill" id="robotPill">--</span></div>
+            <div class="robot-sub">扩展坞 Orin Nano 8GB · MID360</div>
+          </div>
+        </div>
+        <div class="stat4">
+          <div><span>电量</span><b id="sBat">--</b></div>
+          <div><span>速度</span><b id="sSpd">--</b></div>
+          <div><span>今日里程</span><b id="sOdo">--</b></div>
+          <div><span>坐标系</span><b id="sFrame">--</b></div>
+        </div>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>图层</h3><span class="meta" id="layerCount"></span></div>
+        <div class="layers" id="layers"></div>
+      </section>
+
+      <section class="panel card topics-card">
+        <div class="card-h"><h3>Topic</h3><span class="meta" id="topicCount"></span></div>
+        <input class="search" id="topicSearch" placeholder="筛选 topic…" autocomplete="off">
+        <div class="topics" id="topics"></div>
+      </section>
+    </aside>
+
+    <main class="center">
+      <section class="stage" id="stage">
+        <canvas id="map"></canvas>
+        <button class="side-tab" id="leftToggle" title="收起左栏 ( [ )" aria-label="收起左栏" aria-expanded="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 6l-6 6 6 6"/></svg></button>
+        <button class="side-tab" id="rightToggle" title="收起右栏 ( ] )" aria-label="收起右栏" aria-expanded="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></button>
+        <div class="hud hud-tl" id="hudTl">
+          <button class="title" id="hudToggle" title="收起 / 展开">地图 <b id="hMap">--</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
+          <span class="k">位姿</span><span class="v" id="hPose">--</span>
+          <span class="k">速度</span><span class="v" id="hVel">--</span>
+          <span class="k">frame</span><span class="v" id="hFrame">--</span>
+        </div>
+        <div class="aim-hint" id="aimHint" hidden></div>
+        <div class="hud hud-tr">
+          <button class="ib" id="vFollow" title="跟随机器人 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
+          <button class="ib" id="vFit" title="适配地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+          <button class="ib" id="vIn" title="放大"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="ib" id="vOut" title="缩小"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14"/></svg></button>
+        </div>
+        <div class="mode-tag" id="mapTag" hidden>建图中 · slam_toolbox</div>
+        <div class="tele" id="teleHint" hidden>
+          <div class="keys"><kbd data-k="q">Q</kbd><kbd data-k="w">W</kbd><kbd data-k="e">E</kbd><kbd data-k="a">A</kbd><kbd data-k="s">S</kbd><kbd data-k="d">D</kbd></div>
+          <div><b>键盘遥控</b><div style="color:var(--muted);font-size:11px;margin-top:2px">按住移动，松开即停 · W/S 前后 · A/D 转向 · Q/E 横移</div></div>
+        </div>
+        <div class="toolbar" id="toolbar">
+          <button class="tool" data-tool="pan" title="选择 / 平移"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M5 3l14 8-6 2-2 6z"/></svg><span>平移</span><kbd>1</kbd></button>
+          <button class="tool" data-tool="init" title="设置初始位姿：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="7"/><path d="M12 12l5-5M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><span>初始位姿</span><kbd>2</kbd></button>
+          <button class="tool" data-tool="goal" title="导航目标：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 21V4h10l-2 4 2 4H6"/></svg><span>导航目标</span><kbd>3</kbd></button>
+          <button class="tool" data-tool="A" title="巡逻点 A"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6-6.2-6-11a6 6 0 0112 0c0 4.8-6 11-6 11z"/><path d="M10 12l2-5 2 5M10.7 10.5h2.6"/></svg><span>A 点</span><kbd>4</kbd></button>
+          <button class="tool" data-tool="B" title="巡逻点 B"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6-6.2-6-11a6 6 0 0112 0c0 4.8-6 11-6 11z"/><path d="M10.5 7h2.2a1.4 1.4 0 010 2.8h-2.2zM10.5 9.8h2.6a1.4 1.4 0 010 2.8h-2.6z"/></svg><span>B 点</span><kbd>5</kbd></button>
+          <button class="tool" data-tool="measure" title="测距"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg><span>测距</span><kbd>6</kbd></button>
+          <div class="tsep"></div>
+          <button class="tool" data-tool="teleop" title="键盘遥控"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10.5v4M5 12.5h4"/><circle cx="16" cy="11.5" r="1"/><circle cx="18" cy="13.5" r="1"/></svg><span>遥控</span><kbd>T</kbd></button>
+        </div>
+        <div class="hud hud-bl">
+          <div class="scale"><div class="scale-bar" id="scaleBar"></div><span id="scaleTxt">1 m</span></div>
+          <div class="cursor" id="cursor">x <b>--</b>  y <b>--</b>  cost <b>--</b></div>
+        </div>
+        <div class="hud hud-br">
+          <div class="lg"><span style="background:var(--accent)"></span>全局路径</div>
+          <div class="lg"><span style="background:var(--traj)"></span>局部轨迹</div>
+          <div class="lg"><span style="background:#fff"></span>激光</div>
+          <div class="lg"><span class="grad"></span>点云 0.3 → 1.6 m</div>
+        </div>
+        <div class="offline" id="offline" hidden><div><b id="offT">正在连接后端…</b><span id="offS"></span></div></div>
+        <div class="toast" id="toast"><i>✓</i><span></span></div>
+        <div class="banner" id="estopBanner" hidden>
+          <div class="banner-box">
+            <h2>急停已触发</h2>
+            <p>已发送 StopMove，底盘已锁定。解除后需要重新解锁才能运动。</p>
+            <button class="btn" id="estopRelease">解除急停</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel drawer" id="drawer">
+        <div class="drawer-grip" id="drawerGrip" title="拖动调整高度，双击恢复默认"></div>
+        <div class="dh">
+          <button class="dtab on" data-pane="pLogs">日志</button>
+          <button class="dtab" data-pane="pPlots">曲线</button>
+          <button class="dtab" data-pane="pMaps">地图与录包</button>
+          <div class="sp"></div>
+          <div id="logFilters" style="display:flex;gap:4px">
+            <button class="fchip on" data-lv="ALL">全部</button><button class="fchip" data-lv="INFO">INFO</button><button class="fchip" data-lv="WARN">WARN</button><button class="fchip" data-lv="ERROR">ERROR</button>
+          </div>
+          <button class="ib" id="drawerToggle" title="收起 / 展开" style="width:28px;height:28px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 9l6 6 6-6"/></svg></button>
+        </div>
+        <div class="db">
+          <div class="dpane logs" id="pLogs"></div>
+          <div class="dpane" id="pPlots" hidden>
+            <div class="plots">
+              <div class="plot-side" id="plotSide">
+                <span class="plot-tip">可多选，同时显示</span>
+                <button data-m="v" aria-pressed="false">线速度 vx</button>
+                <button data-m="w" aria-pressed="false">角速度 wz</button>
+                <button data-m="tilt" aria-pressed="false">姿态 roll / pitch</button>
+                <button data-m="loc" aria-pressed="false">定位匹配率</button>
+              </div>
+              <div class="plot-grid" id="plotGrid"></div>
+            </div>
+          </div>
+          <div class="dpane" id="pMaps" hidden>
+            <div class="mb">
+              <div>
+                <h4>地图 <span class="mono" style="color:var(--muted);font-size:11px">data/maps</span></h4>
+                <div class="inrow"><input id="mapName" value="lab_20261030"><button class="btn sm" id="saveMap">保存当前地图</button></div>
+                <div id="mapList"></div>
+              </div>
+              <div>
+                <h4>录包 <span class="mono" style="color:var(--muted);font-size:11px">data/bags</span></h4>
+                <div class="inrow"><input id="bagTopics" value="/scan /odom /tf /plan /cmd_vel /lowstate"><button class="btn sm" id="bagBtn">开始录包</button></div>
+                <div id="bagList"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="col right">
+      <section class="panel card" id="taskCard">
+        <div class="card-h"><h3>导航任务</h3><span class="pill" id="taskPill">--</span></div>
+        <div id="taskBody">
+          <div class="task-title" id="taskTitle">--</div>
+          <div class="task-sub" id="taskSub">--</div>
+          <div class="prog"><div class="prog-bar" id="progBar"></div></div>
+          <div class="kv4">
+            <div><span>剩余</span><b id="tRem">--</b></div>
+            <div><span>预计</span><b id="tEta">--</b></div>
+            <div><span>用时</span><b id="tEl">--</b></div>
+            <div><span>恢复</span><b id="tRec">0</b></div>
+          </div>
+          <ol class="steps" id="steps"></ol>
+        </div>
+        <div class="empty" id="taskEmpty" hidden>当前没有任务。在地图上用「导航目标」点选一个位置，或者设置好 A、B 点后开始巡逻。</div>
+        <div class="btn-row">
+          <button class="btn" id="btnPause">暂停</button>
+          <button class="btn danger" id="btnCancel">取消</button>
+          <button class="btn pri" id="btnPatrol">开始巡逻</button>
+        </div>
+        <div class="patrol-opt"><label for="patrolLoops">巡逻往返</label><input id="patrolLoops" type="number" min="0" max="1000" value="0"><span>次 · 0 = 一直往返</span></div>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>运行档位</h3><button class="btn sm ghost" id="modeStop">全部停止</button></div>
+        <div class="modes" id="modes"></div>
+        <div class="procs" id="procs"></div>
+        <div class="nodes" id="nodes"></div>
+        <div class="safety debug-only"><span>安全测试：网页断线 3 s，底盘应自动停车并锁定</span><button class="btn sm ghost" id="simDrop">模拟断线</button></div>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>定位质量</h3><span class="meta">AMCL · Omni</span></div>
+        <div class="loc3">
+          <div><span>位置 σ</span><b id="lStd">--</b></div>
+          <div><span>航向 σ</span><b id="lYaw">--</b></div>
+          <div><span>匹配率</span><b id="lMatch">--</b></div>
+        </div>
+        <canvas class="spark" id="spark"></canvas>
+      </section>
+
+      <section class="panel card">
+        <div class="card-h"><h3>底盘控制</h3><span class="meta">go2w_cmd_bridge</span></div>
+        <div class="arm" id="armBox" data-s="unknown">
+          <div class="arm-ico" id="armIco"></div>
+          <div class="arm-t"><b id="armT">--</b><span id="armS">--</span></div>
+          <button class="btn sm" id="armBtn">解锁</button>
+        </div>
+        <div class="sl"><label for="slV">最大 vx</label><input type="range" id="slV" min="0.1" max="1.2" step="0.05" value="0.45"><output id="oV">0.45 m/s</output></div>
+        <div class="sl"><label for="slW">最大 wz</label><input type="range" id="slW" min="0.2" max="1.5" step="0.1" value="1.2"><output id="oW">1.2 rad/s</output></div>
+        <div class="sl debug-only"><label for="slT">指令超时</label><input type="range" id="slT" min="0.1" max="1" step="0.1" value="0.3"><output id="oT">0.3 s</output></div>
+      </section>
+    </aside>
+  </div>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
