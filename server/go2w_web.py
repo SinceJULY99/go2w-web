@@ -32,8 +32,10 @@ import json
 import math
 import os
 import struct
+import tempfile
 import threading
 import time
+import uuid
 import zlib
 from collections import deque
 
@@ -676,7 +678,9 @@ class Bridge(Node):
         with self.lock:
             self.goal = {'id': gid, 'pose': pose, 't0': time.monotonic(), 'status': 'active', 'end': None,
                          'remaining': None, 'total': None, 'nav_time': None, 'eta': None, 'recoveries': 0}
-        handle.get_result_async().add_done_callback(lambda f: self.on_result(gid, f))
+        result = handle.get_result_async()
+        result.add_done_callback(lambda f: self.on_result(gid, f))
+        return result
 
     def cancel_all(self):
         """取消所有 navigate_to_pose 目标（零 uuid + 零时间戳 = 全部），包括 RViz、patrol 发的。"""
@@ -877,6 +881,22 @@ class Server:
         self.teleop = None            # (vx, vy, wz, 收到时间)；None = 没有在遥控
         self.maps = P.list_maps(os.path.join(DATA, 'maps'))
         self.bags = P.list_bags(os.path.join(DATA, 'bags'))
+        self.routes_file = os.path.join(DATA, 'routes.json')
+        self.routes = {}
+        self.routes_error = False
+        self.motion_stops = 0
+        try:
+            with open(self.routes_file, encoding='utf-8') as f:
+                self.routes = {r['id']: self.route_record(r, r['id']) for r in json.load(f)}
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            self.routes_error = True
+            node.event('ERROR', f'无法读取导航任务 {self.routes_file}：{e}')
+        self.route = None
+        self.route_job = None
+        self.goal_pending = False
+        self.map_loading = False
 
     # ---------- 工具 ----------
     def aw(self, fut, timeout=3.0):
@@ -898,31 +918,36 @@ class Server:
 
     async def disarm_and_cancel(self, reason):
         """停车：取消所有导航 + 上锁。服务不可用时照样尝试另一半，并如实报告。"""
-        n, errors = self.node, []
-        if self.teleop is not None:   # 遥控也立即停
-            self.teleop = None
-            n.publish_cmd(0.0, 0.0, 0.0)
-        if n.cancel_cli.service_is_ready():
-            try:
-                await self.aw(n.cancel_all(), 2.0)
-            except Exception as e:
-                errors.append(f'取消导航失败：{e!r}')
-        if n.arm_cli.service_is_ready():
-            try:
-                r = await self.aw(n.call_arm(False), 2.0)
-                if r.success:
-                    n.armed, n.armed_t = False, time.monotonic()   # 不等下一条 ~/armed，cmd_bridge 可能马上就被停掉
-                else:
-                    errors.append(f'上锁失败：{r.message}')
-            except Exception as e:
-                errors.append(f'上锁失败：{e!r}')
-        else:
-            errors.append('cmd_bridge 不在线，无法上锁（底盘没有在执行导航指令时不影响）')
-        if errors:
-            n.event('ERROR', f'{reason}：' + '；'.join(errors))
-        else:
-            n.event('WARN', f'{reason}：已取消导航并上锁')
-        return errors
+        self.motion_stops += 1
+        try:
+            n, errors = self.node, []
+            self.stop_route(reason)
+            if self.teleop is not None:   # 遥控也立即停
+                self.teleop = None
+                n.publish_cmd(0.0, 0.0, 0.0)
+            if n.cancel_cli.service_is_ready():
+                try:
+                    await self.aw(n.cancel_all(), 2.0)
+                except Exception as e:
+                    errors.append(f'取消导航失败：{e!r}')
+            if n.arm_cli.service_is_ready():
+                try:
+                    r = await self.aw(n.call_arm(False), 2.0)
+                    if r.success:
+                        n.armed, n.armed_t = False, time.monotonic()   # 不等下一条 ~/armed，cmd_bridge 可能马上就被停掉
+                    else:
+                        errors.append(f'上锁失败：{r.message}')
+                except Exception as e:
+                    errors.append(f'上锁失败：{e!r}')
+            else:
+                errors.append('cmd_bridge 不在线，无法上锁（底盘没有在执行导航指令时不影响）')
+            if errors:
+                n.event('ERROR', f'{reason}：' + '；'.join(errors))
+            else:
+                n.event('WARN', f'{reason}：已取消导航并上锁')
+            return errors
+        finally:
+            self.motion_stops -= 1
 
     # ---------- 指令 ----------
     def remote(self, ws):
@@ -930,15 +955,23 @@ class Server:
 
     async def run_cmd(self, ws, d):
         try:
-            ok, text = await self.handle_cmd(ws, d)
+            ok, text, *data = await self.handle_cmd(ws, d)
         except Exception as e:
             self.node.get_logger().error(f'cmd {d.get("op")}: {e!r}')
-            ok, text = False, f'后端出错：{e!r}'
+            ok, text, data = False, f'后端出错：{e!r}', []
         if not ws.closed:
-            await ws.send_str(json.dumps({'t': 'ack', 'id': d.get('id'), 'ok': ok, 'msg': text}))
+            reply = {'t': 'ack', 'id': d.get('id'), 'ok': ok, 'msg': text}
+            if data:
+                reply['data'] = data[0]
+            await ws.send_str(json.dumps(reply))
 
     async def handle_cmd(self, ws, d):
         n, op = self.node, d.get('op')
+        if ws.closed or ws not in self.clients:
+            return False, '网页已断开'
+        if self.route_running() and (op in ('goal', 'initial_pose', 'start_patrol')
+                                     or (op == 'arm' and d.get('on'))):
+            return False, '多点任务进行中：请先取消任务'
         if op in ('goal', 'arm', 'cancel', 'estop'):
             self.owner = ws
         try:
@@ -964,27 +997,42 @@ class Server:
                     return False, '巡逻进行中：先停止巡逻再发目标'
                 if not n.nav.server_is_ready():
                     return False, 'Nav2 没有运行（navigate_to_pose 不可用）'
-                h = await self.aw(n.send_goal(d['x'], d['y'], d['th']), 3.0)
-                if not h.accepted:
-                    return False, 'Nav2 拒绝了这个目标'
-                n.track_goal(h, (d['x'], d['y'], d['th']))
+                if self.goal_pending:
+                    return False, '正在发送导航目标'
+                self.route = None
+                self.goal_pending = True
+                try:
+                    h = await self.aw(n.send_goal(d['x'], d['y'], d['th']), 3.0)
+                    if not h.accepted:
+                        return False, 'Nav2 拒绝了这个目标'
+                    n.track_goal(h, (d['x'], d['y'], d['th']))
+                finally:
+                    self.goal_pending = False
                 n.event('INFO', f"导航目标 ({d['x']:.2f}, {d['y']:.2f}, {math.degrees(d['th']):.0f}°)")
                 return True, '目标已下发' if n.is_armed() else '目标已下发，底盘上锁中，解锁后才会运动'
             if op == 'cancel':
-                # 巡逻中只取消当前目标的话，patrol.py 会重试，机器人又走起来：要连巡逻一起停
-                if self.prof('patrol') != 'stop':
-                    await self.procs.stop_patrol()
-                    await asyncio.sleep(0.5)
-                    await self.refresh_procs()
-                    n.event('INFO', '已停止巡逻')
-                if not n.cancel_cli.service_is_ready():
-                    return False, 'Nav2 没有运行'
-                await self.aw(n.cancel_all(), 2.0)
-                return True, '已取消导航'
+                self.motion_stops += 1
+                try:
+                    self.stop_route('手动取消')
+                    # 巡逻中只取消当前目标的话，patrol.py 会重试，机器人又走起来：要连巡逻一起停
+                    if self.prof('patrol') != 'stop':
+                        await self.procs.stop_patrol()
+                        await asyncio.sleep(0.5)
+                        await self.refresh_procs()
+                        n.event('INFO', '已停止巡逻')
+                    if not n.cancel_cli.service_is_ready():
+                        return False, 'Nav2 没有运行'
+                    await self.aw(n.cancel_all(), 2.0)
+                    return True, '已取消导航'
+                finally:
+                    self.motion_stops -= 1
             if op == 'arm':
                 on = bool(d.get('on'))
                 if on and self.estop:
                     return False, '急停中：先解除急停'
+                if not on and self.route_running():
+                    errors = await self.disarm_and_cancel('底盘上锁')
+                    return (False, '；'.join(errors)) if errors else (True, '底盘已上锁，任务已取消')
                 if not n.arm_cli.service_is_ready():
                     return False, 'cmd_bridge 没有运行（导航没启动？）'
                 r = await self.aw(n.call_arm(on), 2.0)
@@ -1007,6 +1055,13 @@ class Server:
                 return False, f'参数没有生效：{res.reason}'
             if op == 'set_mode':
                 return self.set_mode(d.get('mode'), d.get('map'))
+            if op == 'route_save':
+                result = self.save_route(d)
+                if result[0]:
+                    await self.send_all(self.routes_message())
+                return result
+            if op == 'route_start':
+                return self.start_route(ws, d.get('route_id'))
             if op == 'patrol_point':
                 k = d.get('k')
                 if k not in ('A', 'B'):
@@ -1050,6 +1105,169 @@ class Server:
         except (KeyError, TypeError, ValueError) as e:
             return False, f'指令格式不对：{e!r}'
 
+    # ---------- 多点导航 ----------
+    @staticmethod
+    def route_record(d, route_id):
+        name, map_name, points = d['name'], d['map'], d['points']
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 60:
+            raise ValueError('任务名称需要 1–60 个字符')
+        if not isinstance(map_name, str) or not map_name:
+            raise ValueError('需要绑定地图')
+        if not isinstance(points, list) or not 2 <= len(points) <= 50:
+            raise ValueError('每条路线需要 2–50 个点')
+        for point in points:
+            if not isinstance(point, dict) or any(
+                type(point.get(k)) not in (float, int) or not math.isfinite(point[k]) for k in ('x', 'y', 'th')
+            ):
+                raise ValueError('路线包含无效坐标')
+        return {'id': route_id, 'name': name.strip(), 'map': map_name,
+                'points': [{k: p[k] for k in ('x', 'y', 'th')} for p in points]}
+
+    def save_route(self, d):
+        if self.routes_error:
+            return False, '任务文件读取失败，请检查后端日志'
+        if not self.node.map_current or d.get('map') != self.node.map_current or self.map_loading or self.busy:
+            return False, '请在路线对应的地图上保存'
+        route_id = d.get('route_id')
+        if route_id is not None and route_id not in self.routes:
+            return False, '找不到要更新的任务'
+        route_id = route_id or uuid.uuid4().hex
+        record = self.route_record(d, route_id)
+        routes = {**self.routes, route_id: record}
+        os.makedirs(DATA, exist_ok=True)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=DATA, delete=False) as f:
+                tmp = f.name
+                json.dump(list(routes.values()), f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.routes_file)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+        self.routes = routes
+        return True, f"已保存任务：{record['name']}", record
+
+    def routes_message(self):
+        return json.dumps({'t': 'routes', 'items': list(self.routes.values())})
+
+    def route_running(self):
+        return self.route_job is not None and not self.route_job.done()
+
+    def route_blocker(self, ws, route):
+        n = self.node
+        client = self.clients.get(ws)
+        if client is None or ws.closed or time.monotonic() - client['last_ping'] > self.heartbeat:
+            return '控制方网页连接已断开'
+        if self.estop or not n.is_armed():
+            return '急停或底盘未解锁'
+        if self.busy or self.map_loading or self.motion_stops or self.prof('navigation') != 'run' or not n.nav.server_is_ready():
+            return '导航不可用'
+        if not n.healthy or time.monotonic() - n.healthy_t >= STALE or not n.lookup(BASE_FRAME) or n.fixed != 'map':
+            return '地图定位或里程计不可用'
+        if n.map_current != route['map']:
+            return f"请先切换到地图 {route['map']}"
+        return None
+
+    def start_route(self, ws, route_id):
+        route = self.routes.get(route_id)
+        if route is None:
+            return False, '找不到这个导航任务'
+        if (self.route_running() or self.goal_pending or self.node.nav_active()
+                or self.prof('patrol') != 'stop' or self.teleop is not None):
+            return False, '请先结束当前导航、巡逻或遥控'
+        reason = self.route_blocker(ws, route)
+        if reason:
+            return False, reason
+        self.owner = ws
+        self.route = {'record': route, 'index': 0, 'status': 'active', 'started': time.monotonic(),
+                      'message': '', 'stop': asyncio.Event(), 'goal': None}
+        self.route_job = asyncio.create_task(self.run_route(ws, self.route))
+        return True, f"开始任务：{route['name']}"
+
+    def finish_route(self, route, status, message):
+        route.update(status=status, message=message, ended=time.monotonic())
+        route['stop'].set()
+        self.node.event('ERROR' if status == 'aborted' else 'INFO', message)
+
+    def stop_route(self, reason):
+        if self.route and self.route['status'] == 'active':
+            self.finish_route(self.route, 'canceled', reason)
+
+    async def run_route(self, ws, route):
+        n, record = self.node, route['record']
+        try:
+            for i, point in enumerate(record['points']):
+                if route['stop'].is_set():
+                    return
+                route.update(index=i, goal=None)
+                reason = self.route_blocker(ws, record)
+                if reason:
+                    raise RuntimeError(reason)
+                pose = (point['x'], point['y'], point['th'])
+                request = n.send_goal(*pose)
+                try:
+                    handle = await self.aw(request, 3.0)
+                except asyncio.TimeoutError:
+                    # 超时后仍可能被 Nav2 接受，只取消这个迟到的目标。
+                    def cancel_late(future):
+                        try:
+                            late = future.result()
+                            if late.accepted:
+                                late.cancel_goal_async()
+                        except Exception as e:
+                            n.event('ERROR', f'取消迟到的路线目标失败：{e}')
+                    request.add_done_callback(cancel_late)
+                    raise RuntimeError('Nav2 接收目标超时') from None
+                if not handle.accepted:
+                    raise RuntimeError('Nav2 拒绝目标')
+                if route['stop'].is_set():
+                    await self.aw(handle.cancel_goal_async(), 2.0)
+                    return
+                result = n.track_goal(handle, pose)
+                route['goal'] = point
+                stop = asyncio.create_task(route['stop'].wait())
+                done = asyncio.create_task(self.aw(result, 180.0))
+                try:
+                    await asyncio.wait((stop, done), return_when=asyncio.FIRST_COMPLETED)
+                    if route['stop'].is_set():
+                        return
+                    status = done.result().status
+                except asyncio.TimeoutError:
+                    await self.aw(handle.cancel_goal_async(), 2.0)
+                    raise RuntimeError('等待到点超时') from None
+                finally:
+                    stop.cancel()
+                    done.cancel()
+                    await asyncio.gather(stop, done, return_exceptions=True)
+                if route['stop'].is_set():
+                    return
+                if status == GoalStatus.STATUS_CANCELED:
+                    self.finish_route(route, 'canceled', f'第 {i + 1} 点已取消')
+                    return
+                if status != GoalStatus.STATUS_SUCCEEDED:
+                    raise RuntimeError('Nav2 未能到达')
+            self.finish_route(route, 'succeeded', '已到达全部导航点')
+        except Exception as e:
+            if not route['stop'].is_set():
+                self.finish_route(route, 'aborted', f'第 {route["index"] + 1} 点失败：{e}')
+            else:
+                n.event('ERROR', f'多点任务停止时出错：{e}')
+
+    def task(self):
+        goal, route = self.node.task(), self.route
+        if not route:
+            return goal
+        status = route['status']
+        if status != 'active' and time.monotonic() - route['ended'] > 10:
+            self.route = None
+            return goal
+        record, i = route['record'], route['index']
+        leg = goal if goal and goal['type'] == 'goal' and goal['goal'] == route['goal'] else {}
+        return {**leg, 'type': 'route', 'name': record['name'], 'status': status,
+                'phase': (leg.get('phase') if leg.get('status') == 'active' else 'plan') if status == 'active' else status,
+                'goal': record['points'][i], 'point': i + 1, 'count': len(record['points']),
+                'message': route['message'], 'elapsed': route.get('ended', time.monotonic()) - route['started']}
+
     # ---------- P3：运行档位、巡逻、录包、地图 ----------
     MODE_NAME = {'mapping': '建图', 'localization': '定位', 'navigation': '导航'}
 
@@ -1087,6 +1305,7 @@ class Server:
         if not cur and mode is None:
             return True, '没有在运行的档位'
         self.busy = True
+        self.stop_route('切换运行档位')
         self.background(self.do_mode(mode, cur, map_name))
         if mode is None:
             return True, '正在停止……'
@@ -1139,6 +1358,7 @@ class Server:
             return False, '巡逻已经在运行'
         if not 0 <= loops <= 1000:
             return False, '往返次数要在 0~1000 之间（0 = 一直跑）'
+        self.route = None
         self.transitions['patrol'] = 'starting'
         p.update(loops=loops, legs=0, target=None, state='starting')
         await self.procs.start_patrol(loops)
@@ -1209,12 +1429,19 @@ class Server:
         if not n.loadmap_cli.service_is_ready():
             self.map_choice = name
             return True, f'下次启动定位 / 导航时用 {name}'
-        if n.nav_active():
-            await self.aw(n.cancel_all(), 2.0)
-        r = await self.aw(n.load_map(name), 10.0)
-        if r.result != 0:
-            return False, f'map_server 加载失败（错误码 {r.result}）'
-        n.map_current = name
+        if self.map_loading:
+            return False, '正在切换地图'
+        self.map_loading = True
+        try:
+            self.stop_route('切换地图')
+            if n.nav_active():
+                await self.aw(n.cancel_all(), 2.0)
+            r = await self.aw(n.load_map(name), 10.0)
+            if r.result != 0:
+                return False, f'map_server 加载失败（错误码 {r.result}）'
+            n.map_current = name
+        finally:
+            self.map_loading = False
         n.event('WARN', f'已切换到地图 {name}：请重新设置初始位姿')
         return True, f'已切换到 {name}，请重新设置初始位姿'
 
@@ -1252,7 +1479,10 @@ class Server:
     def on_teleop(self, ws, d):
         """网页按住按键时每 0.1 s 发一次；后端 0.3 s 收不到就发零速并停止发布。"""
         n, now = self.node, time.monotonic()
-        refuse = '急停中' if self.estop else '底盘锁定中，先解锁' if not n.is_armed() else None
+        if self.route_running():
+            refuse = '多点任务进行中，请先取消任务'
+        else:
+            refuse = '急停中' if self.estop else '底盘锁定中，先解锁' if not n.is_armed() else None
         if refuse:
             if now - self.clients[ws].get('teleop_warned', 0) > 2:
                 self.clients[ws]['teleop_warned'] = now
@@ -1298,6 +1528,7 @@ class Server:
         self.clients[ws] = {'remote': req.remote, 'last_ping': time.monotonic(), 'layers': set()}
         self.node.get_logger().info(f'client connected: {req.remote} ({len(self.clients)})')
         try:
+            await ws.send_str(self.routes_message())
             if self.node.map_blob:
                 await ws.send_bytes(self.node.map_blob)
             if self.node.plan:
@@ -1342,7 +1573,7 @@ class Server:
 
     async def lose_owner(self, reason):
         n = self.node
-        if n.is_armed() or n.nav_active():
+        if self.route_running() or n.is_armed() or n.nav_active():
             await self.disarm_and_cancel(reason)
 
     def wants(self, layer):
@@ -1377,6 +1608,10 @@ class Server:
                     if gap > self.heartbeat:
                         self.owner = None
                         await self.lose_owner(f"控制方网页心跳丢失 {gap:.1f} s（{self.clients[o]['remote']}）")
+                if self.route and self.route['status'] == 'active':
+                    reason = self.route_blocker(self.owner, self.route['record'])
+                    if reason:
+                        await self.disarm_and_cancel(reason)
                 # 急停期间底盘被别处解锁（nav.sh arm 等）→ 再次上锁。
                 # 只认急停 1 s 之后收到的「已解锁」，避免把上锁之前的旧状态当成又被解锁
                 if self.estop and n.is_armed() and n.armed_t > self.estop_t + 1.0 and k % 5 == 0:
@@ -1408,7 +1643,7 @@ class Server:
                 if new_map:
                     await self.send_all(n.map_blob)
                 if k % 4 == 0:  # 任务 5 Hz
-                    await self.send_all(json.dumps({'t': 'task', 'task': n.task()}))
+                    await self.send_all(json.dumps({'t': 'task', 'task': self.task()}))
                 if n.plan_ver != plan_ver:
                     plan_ver = n.plan_ver
                     await self.send_all(json.dumps({'t': 'plan', 'pts': n.plan}))
@@ -1459,6 +1694,9 @@ class Server:
                           asyncio.create_task(self.procs_poll())]
 
         async def stop(a):
+            if self.route_running():
+                await self.disarm_and_cancel('网页服务关闭')
+                await asyncio.gather(self.route_job, return_exceptions=True)
             for t in a['tasks']:
                 t.cancel()
 

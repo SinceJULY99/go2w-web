@@ -34,6 +34,25 @@ export function createActions(store, src){
       if (store.costAt && blocked(store.costAt(g.x, g.y))) return toast('目标在障碍物或膨胀区内，请换个位置', 'err');
       exec(src.cmd.goal(g), store.armed ? '目标已下发' : '目标已下发，底盘锁定中，解锁后开始运动', store.armed ? 'ok' : 'warn');
     },
+    routePoint(p){
+      const draft = store.routeDraft, map = store.mapCurrent;
+      if (!map || store.fixed !== 'map') return toast('请先加载地图并等待地图定位', 'err');
+      if (draft.map && draft.map !== map) return toast('路线属于另一张地图，请先新建路线', 'err');
+      if (draft.points.length >= 50) return toast('每条路线最多 50 个点', 'err');
+      if (store.costAt && blocked(store.costAt(p.x, p.y))) return toast('该位置在障碍物或膨胀区内', 'err');
+      store.routeDraft = { ...draft, map, points: [...draft.points, p] };
+      document.getElementById('routesPanel').open = true;
+    },
+    saveRoute(name){
+      const { id, map, points } = store.routeDraft;
+      if (!name.trim() || points.length < 2 || map !== store.mapCurrent) return toast('请在当前地图添加至少两个点，并填写任务名', 'err');
+      return exec(src.cmd.saveRoute({ route_id: id, name, map, points }), '任务已保存');
+    },
+    startRoute(route){
+      if (!canMove()) return toast('请先启动导航、确认定位正常并解锁底盘', 'err');
+      if (!route || route.map !== store.mapCurrent) return toast('请选择当前地图的路线任务', 'err');
+      return exec(src.cmd.startRoute(route.id), '多点任务已启动');
+    },
     patrolPoint(k, p){
       if (!ready('patrolPoint')) return;
       if (store.costAt && blocked(store.costAt(p.x, p.y))) return toast('该位置在障碍物或膨胀区内', 'err');

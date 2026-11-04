@@ -1,3 +1,4 @@
+import { setupRouteEditor } from './routes.js';
 // 左右两栏、顶栏、HUD 和底部抽屉：全部从 store 读，操作交给 actions
 import { $, $$, clamp, deg, fmt, fmtDur, tstr, ACC, TRAJ } from './util.js';
 import { LAYERS, L } from './layers.js';
@@ -122,6 +123,7 @@ export function createPanels(store, src, actions, mapView, bus){
 
   /* ---------- 任务卡片 ---------- */
   // 步骤由数据源给出：模拟器能看到所有内部阶段，真机只能从 Nav2 行为树日志里看到规划 / 跟随 / 恢复
+  const renderRoutes = setupRouteEditor(store, actions);
   const PHASES = src.steps.map(s => s[0]);
   $('#steps').innerHTML = src.steps.map(([p, name, note]) => `<li data-p="${p}">${name}<small>${note}</small></li>`).join('');
   if (!src.can('pause')){ $('#btnPause').title = '真机暂不支持暂停：可以取消任务，或者锁定底盘'; }
@@ -139,19 +141,25 @@ export function createPanels(store, src, actions, mapView, bus){
     else if (T.phase==='recover'){ st = 'warn'; label = '恢复中'; }
     else if (!actions.canMove() && T.phase!=='plan'){ st = 'warn'; label = !store.armed ? '等待解锁' : '底盘不可用'; }
     const pill = $('#taskPill'); pill.dataset.s = st; pill.textContent = label;
-    $('#btnPause').disabled = idle || done || !src.can('pause'); $('#btnPause').textContent = T.paused ? '继续' : '暂停';
+    $('#btnPause').disabled = idle || done || !src.can('pause') || T.type === 'route'; $('#btnPause').textContent = T.paused ? '继续' : '暂停';
     $('#btnCancel').disabled = idle || done;
-    $('#btnPatrol').textContent = T.type==='patrol' ? '巡逻中' : '开始巡逻'; $('#btnPatrol').disabled = T.type==='patrol';
+    $('#btnPatrol').textContent = T.type==='patrol' ? '巡逻中' : '开始巡逻'; $('#btnPatrol').disabled = T.type==='patrol' || (T.type==='route' && !done);
     if (idle) return;
     if (T.type==='patrol' && T.legs != null){   // 真机：patrol.py 的进度来自它的日志
       $('#taskTitle').textContent = 'A ↔ B 巡逻';
       $('#taskSub').textContent = `${T.loops ? `往返 ${T.loops} 次` : '一直往返'} · 已完成 ${T.legs} 段${T.leg ? ` · 正在去 ${T.leg} 点` : ''}`;
     }
     else if (T.type==='patrol'){ $('#taskTitle').textContent = 'A ↔ B 巡逻'; $('#taskSub').textContent = `${T.loops >= 1e9 ? `第 ${T.loop} 圈 · 一直往返` : `第 ${T.loop} / ${T.loops} 圈`} · ${T.leg==='B'?'A → B':'B → A'}`; }
+    else if (T.type==='route'){
+      $('#taskTitle').textContent = T.name;
+      $('#taskSub').textContent = T.message || `正在前往第 ${T.point} / ${T.count} 点`;
+    }
     else if (T.type==='external'){ $('#taskTitle').textContent = '外部导航目标'; $('#taskSub').textContent = 'RViz 或 patrol 发出的目标 ·「取消」同样有效'; }
     else { const g = T.goal; $('#taskTitle').textContent = '单点导航'; $('#taskSub').textContent = `目标 (${g.x.toFixed(2)}, ${g.y.toFixed(2)}) · ${deg(g.th).toFixed(0)}°`; }
     const ph = ['dwell','arrived'].includes(T.phase) || T.status==='succeeded' ? 'arrive' : T.phase, rem = T.remaining;
-    $('#progBar').style.width = rem!=null && T.total ? (100*clamp(1 - rem/T.total, 0, 1)).toFixed(1)+'%' : '0%';
+    $('#progBar').style.width = T.type === 'route'
+      ? `${(T.status === 'succeeded' ? 1 : (T.point - 1) / T.count) * 100}%`
+      : rem!=null && T.total ? (100*clamp(1 - rem/T.total, 0, 1)).toFixed(1)+'%' : '0%';
     $('#tRem').textContent = rem==null ? '--' : rem.toFixed(1)+' m';
     const eta = T.eta != null ? T.eta : rem != null ? rem/Math.max(.2, store.params.vmax*.8) : null;
     $('#tEta').textContent = eta==null || done ? '--' : rem < .05 ? '0 s' : Math.ceil(eta)+' s';
@@ -401,7 +409,7 @@ export function createPanels(store, src, actions, mapView, bus){
   renderLayers();
 
   return {
-    fast(){ renderTask(); renderHud(); renderArm(); syncSliders(); }, // 5 Hz
+    fast(){ renderTask(); renderRoutes(); renderHud(); renderArm(); syncSliders(); }, // 5 Hz
     medium(){ renderChips(); renderCharts(); renderProfiles(); },  // 4 Hz
     slow(){ renderTopics(); renderMaps(); $('#clock').textContent = new Date().toTimeString().slice(0,8); }, // 1 Hz
     pushHist,                                                      // 10 Hz

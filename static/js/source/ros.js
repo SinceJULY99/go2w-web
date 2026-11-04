@@ -6,7 +6,7 @@ import { gridToCanvas, costToCanvas, CLOUD } from '../util.js';
 const T_MAP = 1, T_SCAN = 2, T_GCOST = 3, T_LCOST = 4, T_CLOUD = 5, T_PART = 6;
 // 已接入真机的操作；其余操作给出说明，不发任何指令
 const OPS = new Set(['initialPose', 'goal', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
-  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveMap', 'loadMap', 'teleop']);
+  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'saveMap', 'loadMap', 'teleop']);
 const NOT_YET = {
   pause: '真机暂不支持暂停：可以取消任务，或者锁定底盘',
 };
@@ -71,23 +71,25 @@ export function createRosSource(store, bus){
     if (!t){ store.task = { type: 'idle' }; store.goal = null; lastTask = null; return; }
     // 结果只提示一次（后端会把结束的任务保留 5 s）
     if (lastTask && lastTask.status === 'active' && t.status !== 'active'){
-      if (t.status === 'succeeded' && t.goal) bus.emit('toast', `已到达目标 (${t.goal.x.toFixed(2)}, ${t.goal.y.toFixed(2)})`);
-      if (t.status === 'aborted') bus.emit('toast', '导航失败：Nav2 放弃了这个目标，看日志了解原因', 'err');
+      if (t.type === 'route') bus.emit('toast', t.message, t.status === 'aborted' ? 'err' : t.status === 'canceled' ? 'warn' : 'ok');
+      else if (t.status === 'succeeded' && t.goal) bus.emit('toast', `已到达目标 (${t.goal.x.toFixed(2)}, ${t.goal.y.toFixed(2)})`);
+      else if (t.status === 'aborted') bus.emit('toast', '导航失败：Nav2 放弃了这个目标，看日志了解原因', 'err');
     }
     lastTask = t;
     store.task = { ...t, paused: false };
-    store.goal = t.type === 'goal' && t.status === 'active' ? t.goal : null;
+    store.goal = ['goal', 'route'].includes(t.type) && t.status === 'active' ? t.goal : null;
   }
 
   function onJson(m){
     switch (m.t){
       case 'pong': store.link.ms = performance.now() - m.ts; break;
-      case 'ack': { const res = pending.get(m.id); if (res){ pending.delete(m.id); res({ ok: m.ok, msg: m.msg }); } break; }
+      case 'ack': { const res = pending.get(m.id); if (res){ pending.delete(m.id); res({ ok: m.ok, msg: m.msg, data: m.data }); } break; }
       case 'log': log(m.level, m.node, m.msg); break;
       case 'logs': for (const [lv, node, msg] of m.items) log(lv, node, msg); break;
       case 'plan': rawPlan = m.pts.length > 1 ? m.pts : null; break;
       case 'toast': bus.emit('toast', m.msg, m.level || 'warn'); break;
       case 'msg': for (const cb of watchers.get(m.topic) || []) cb(m); break;
+      case 'routes': store.routes = m.items; break;
       case 'task': onTask(m.task); break;
       case 'pose': {
         const R = store.robot;
@@ -188,6 +190,8 @@ export function createRosSource(store, bus){
       : (store.profiles.bag === 'stop'
         ? send('bag_start', { topics: (store.bagTopics || '').trim().split(/\s+/).filter(Boolean) })
         : send('bag_stop')),
+    saveRoute: route => send('route_save', route),
+    startRoute: route_id => send('route_start', { route_id }),
     startPatrol: () => send('start_patrol', { loops: store.patrolLoops ?? 0 }),
     setPatrolPoint: (k, p) => send('patrol_point', { k, ...p }),
     saveMap: name => send('save_map', { name }),

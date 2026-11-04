@@ -21,6 +21,8 @@ export function createStore(){
     localPlan: null, mppi: [], particles: new Float32Array(0),
     trail: [],
     goal: null,
+    routes: [],
+    routeDraft: { id: null, map: null, points: [] },
     patrol: { A: null, B: null, loops: 5 },
     // task.phase: plan | align | follow | final | dwell | arrived
     task: { type: 'idle' },

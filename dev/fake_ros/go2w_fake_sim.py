@@ -359,7 +359,19 @@ class Sim:
                      'mark': (time.monotonic(), self.x, self.y), 'recover_until': 0.0}
         self.publish_status()
         self.bt(('ComputePathToPose', 'IDLE', 'RUNNING'))
-        return N(accepted=True, goal_id=N(uuid=list(gid)), get_result_async=lambda: self.goal_by(gid)['result'])
+        def cancel():
+            f = Future()
+
+            def apply():
+                if self.goal and self.goal['id'] == gid and self.goal['status'] in (ACCEPTED, EXECUTING):
+                    self.finish(CANCELED)
+                f.set_result(None)
+
+            self.later(apply)
+            return f
+
+        return N(accepted=True, goal_id=N(uuid=list(gid)), get_result_async=lambda: self.goal_by(gid)['result'],
+                 cancel_goal_async=cancel)
 
     def goal_by(self, gid):
         if self.goal and self.goal['id'] == gid:

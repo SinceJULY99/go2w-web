@@ -100,6 +100,7 @@
           <button class="tool" data-tool="goal" title="导航目标：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 21V4h10l-2 4 2 4H6"/></svg><span>导航目标</span><kbd>3</kbd></button>
           <button class="tool" data-tool="A" title="巡逻点 A"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6-6.2-6-11a6 6 0 0112 0c0 4.8-6 11-6 11z"/><path d="M10 12l2-5 2 5M10.7 10.5h2.6"/></svg><span>A 点</span><kbd>4</kbd></button>
           <button class="tool" data-tool="B" title="巡逻点 B"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-6-6.2-6-11a6 6 0 0112 0c0 4.8-6 11-6 11z"/><path d="M10.5 7h2.2a1.4 1.4 0 010 2.8h-2.2zM10.5 9.8h2.6a1.4 1.4 0 010 2.8h-2.6z"/></svg><span>B 点</span><kbd>5</kbd></button>
+          <button class="tool" data-tool="route" title="添加路线点：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 17l5-10 7 8"/><circle cx="6" cy="17" r="2"/><circle cx="11" cy="7" r="2"/><circle cx="18" cy="15" r="2"/></svg><span>路线点</span><kbd>7</kbd></button>
           <button class="tool" data-tool="measure" title="测距"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg><span>测距</span><kbd>6</kbd></button>
           <div class="tsep"></div>
           <button class="tool" data-tool="teleop" title="键盘遥控"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10.5v4M5 12.5h4"/><circle cx="16" cy="11.5" r="1"/><circle cx="18" cy="13.5" r="1"/></svg><span>遥控</span><kbd>T</kbd></button>
@@ -191,6 +192,25 @@
           <button class="btn pri" id="btnPatrol">开始巡逻</button>
         </div>
         <div class="patrol-opt"><label for="patrolLoops">巡逻往返</label><input id="patrolLoops" type="number" min="0" max="1000" value="0"><span>次 · 0 = 一直往返</span></div>
+      </section>
+
+      <section class="panel card">
+        <details id="routesPanel">
+          <summary>多点路线任务</summary>
+          <div class="route-form">
+            <div class="inrow">
+              <select id="routeSelect" aria-label="已保存任务"></select>
+              <button class="btn sm" id="routeRun">执行</button>
+            </div>
+            <div class="inrow">
+              <input id="routeName" placeholder="任务名称" aria-label="任务名称" maxlength="60">
+              <button class="btn sm" id="routeNew">新建</button>
+              <button class="btn sm pri" id="routeSave">保存</button>
+            </div>
+            <div class="route-hint" id="routeHint"></div>
+            <ol id="routePoints" class="route-points"></ol>
+          </div>
+        </details>
       </section>
 
       <section class="panel card">

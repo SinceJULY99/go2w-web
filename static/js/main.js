@@ -34,6 +34,7 @@ function teleCmd(){
 function enterTeleop(){
   if (!src.can('teleop')){ src.cmd.notice('teleop'); return false; }
   if (!actions.canMove()){ toast(store.estop ? '急停中，无法遥控' : !store.armed ? '底盘已锁定，先解锁再遥控' : '导航或里程计没有运行', 'err'); return false; }
+  if (store.task.type === 'route' && store.task.status === 'active'){ toast('请先取消多点任务', 'err'); return false; }
   if (store.task.type !== 'idle') toast('已取消当前任务，进入键盘遥控', 'warn');
   return true;
 }
@@ -53,7 +54,7 @@ window.addEventListener('keydown', e => {
   if (k === 'escape') return setTool('pan');
   if (k === '[') return panels.toggleLeft();
   if (k === ']') return panels.toggleRight();
-  const n = +k; if (n >= 1 && n <= 6) setTool(mapView.TOOLS[n-1]);
+  const n = +k; if (n >= 1 && n <= 7) setTool(mapView.TOOLS[n-1]);
   if (k === 't') setTool(mapView.tool === 'teleop' ? 'pan' : 'teleop');
   if (k === 'f') document.getElementById('vFollow').click();
 });

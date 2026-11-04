@@ -10,7 +10,7 @@ export function createMapView(store, actions){
   let touched = false; // 用户动过视角后，窗口尺寸变化不再自动适配
   // aim：点了一下位置、还在等第二下确定朝向（点两下 = 按住拖动的替代，触控板更好用）
   const V = { tool: 'pan', measure: [], drag: null, aim: null };
-  const POSE_TOOLS = { init: '初始位姿', goal: '导航目标', A: '巡逻点 A', B: '巡逻点 B' };
+  const POSE_TOOLS = { init: '初始位姿', goal: '导航目标', A: '巡逻点 A', B: '巡逻点 B', route: '路线点' };
   const hint = $('#aimHint');
   function showHint(){
     const name = POSE_TOOLS[V.tool];
@@ -133,6 +133,18 @@ export function createMapView(store, actions){
       for (let i=0;i<pa.length;i+=3){ const x = sx(pa[i]), y = sy(pa[i+1]), a = pa[i+2]; ctx.moveTo(x,y); ctx.lineTo(x+Math.cos(-a)*7, y+Math.sin(-a)*7); } ctx.stroke(); }
     if (store.patrol.A) drawPin(store.patrol.A, 'A', '#f2f6fb');
     if (store.patrol.B) drawPin(store.patrol.B, 'B', '#f2f6fb');
+    const draft = store.routeDraft;
+    if (draft.map && draft.map === store.mapCurrent && draft.points.length){
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,224,138,.65)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      draft.points.forEach((p, i) => i ? ctx.lineTo(sx(p.x), sy(p.y)) : ctx.moveTo(sx(p.x), sy(p.y)));
+      ctx.stroke();
+      ctx.restore();
+      draft.points.forEach((p, i) => drawPin(p, String(i + 1), '#ffe08a'));
+    }
     if (store.goal) drawGoal(store.goal);
     if (R.valid) drawRobot();
     if (on('tf')) drawTF();
@@ -161,7 +173,7 @@ export function createMapView(store, actions){
   }
 
   /* ---------- 工具与指针 ---------- */
-  const TOOLS = ['pan','init','goal','A','B','measure','teleop'];
+  const TOOLS = ['pan','init','goal','A','B','measure','route'];
   function setTool(tool, onTeleop){
     if (tool==='teleop' && V.tool!=='teleop' && onTeleop && !onTeleop()) return;
     V.tool = tool; $$('.tool').forEach(b => b.classList.toggle('on', b.dataset.tool===tool));
@@ -177,6 +189,7 @@ export function createMapView(store, actions){
     const p = { x, y, th };
     if (tool==='init') actions.initialPose(p);
     else if (tool==='goal') actions.goal(p);
+    else if (tool==='route') actions.routePoint(p);
     else actions.patrolPoint(tool, p);
   }
   const local = e => { const r = cv.getBoundingClientRect(); return [e.clientX-r.left, e.clientY-r.top]; };

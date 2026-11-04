@@ -157,9 +157,9 @@ body.has-photo .robot-ico{width:104px;height:78px;background:var(--panel)}
 .ib:hover{background:var(--raise);color:var(--fg)}
 .ib.on{color:var(--accent);background:var(--accent-soft)}
 .ib svg{width:17px;height:17px}
-.toolbar{position:absolute;z-index:3;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:2px;padding:5px;border-radius:10px;
+.toolbar{position:absolute;z-index:3;max-width:calc(100% - 24px);overflow-x:auto;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:2px;padding:5px;border-radius:10px;
   background:rgba(6,11,18,.85);backdrop-filter:blur(8px);border:1px solid var(--line-2);box-shadow:0 10px 30px rgba(0,0,0,.4)}
-.tool{display:flex;align-items:center;gap:7px;height:34px;padding:0 11px;border:0;background:none;border-radius:7px;color:var(--fg-2);font-size:12px;white-space:nowrap}
+.tool{display:flex;flex:none;align-items:center;gap:7px;height:34px;padding:0 11px;border:0;background:none;border-radius:7px;color:var(--fg-2);font-size:12px;white-space:nowrap}
 .tool svg{width:16px;height:16px;flex:none}
 .tool:hover{background:var(--raise);color:var(--fg)}
 .tool.on{background:var(--accent-soft);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent-line)}
@@ -350,7 +350,17 @@ input[type=range]{width:100%;accent-color:var(--accent);height:4px}
   .main{flex-direction:column}
   .left,.right{width:auto}
   .stage{height:60vh}
-  .toolbar{max-width:calc(100% - 24px);overflow-x:auto}
   .tool span{display:none}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* 多点路线编辑器 */
+#routesPanel summary{cursor:pointer;font-size:13px;font-weight:700}
+.route-form{margin-top:8px}
+.route-form .inrow{align-items:center}
+.route-form select{flex:1;min-width:0;height:28px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--fg)}
+.route-hint{font-size:11px;color:var(--muted)}
+.route-points{list-style:none;margin:6px 0 0;padding:0;max-height:180px;overflow:auto}
+.route-points li{display:flex;align-items:center;gap:4px;margin-top:4px}
+.route-points span{flex:1;font:11px var(--f-mono)}
+.route-points .btn{padding:0 6px}
