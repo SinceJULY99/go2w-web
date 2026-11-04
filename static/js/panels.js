@@ -7,7 +7,7 @@ import { MODES, MODE_PKG } from './actions.js';
 // 内容没变就不动 DOM：高频重建按钮会吞掉正在进行的点击
 const setHTML = (sel, html) => { const el = $(sel); if (el._html !== html){ el._html = html; el.innerHTML = html; } };
 
-export function createPanels(store, src, actions, mapView, bus){
+export function createPanels(store, src, actions, mapView, bus, setTool){
   const ros = src.name === 'ros';
   const run = id => store.profiles[id] === 'run';
   const now = () => src.now();
@@ -123,7 +123,7 @@ export function createPanels(store, src, actions, mapView, bus){
 
   /* ---------- 任务卡片 ---------- */
   // 步骤由数据源给出：模拟器能看到所有内部阶段，真机只能从 Nav2 行为树日志里看到规划 / 跟随 / 恢复
-  const renderRoutes = setupRouteEditor(store, actions);
+  const renderRoutes = setupRouteEditor(store, actions, setTool);
   const PHASES = src.steps.map(s => s[0]);
   $('#steps').innerHTML = src.steps.map(([p, name, note]) => `<li data-p="${p}">${name}<small>${note}</small></li>`).join('');
   if (!src.can('pause')){ $('#btnPause').title = '真机暂不支持暂停：可以取消任务，或者锁定底盘'; }
@@ -152,7 +152,7 @@ export function createPanels(store, src, actions, mapView, bus){
     else if (T.type==='patrol'){ $('#taskTitle').textContent = 'A ↔ B 巡逻'; $('#taskSub').textContent = `${T.loops >= 1e9 ? `第 ${T.loop} 圈 · 一直往返` : `第 ${T.loop} / ${T.loops} 圈`} · ${T.leg==='B'?'A → B':'B → A'}`; }
     else if (T.type==='route'){
       $('#taskTitle').textContent = T.name;
-      $('#taskSub').textContent = T.message || `正在前往第 ${T.point} / ${T.count} 点`;
+      $('#taskSub').textContent = T.message || (T.phase === 'checking' ? '正在检查出发路线' : `正在前往第 ${T.point} / ${T.count} 站`);
     }
     else if (T.type==='external'){ $('#taskTitle').textContent = '外部导航目标'; $('#taskSub').textContent = 'RViz 或 patrol 发出的目标 ·「取消」同样有效'; }
     else { const g = T.goal; $('#taskTitle').textContent = '单点导航'; $('#taskSub').textContent = `目标 (${g.x.toFixed(2)}, ${g.y.toFixed(2)}) · ${deg(g.th).toFixed(0)}°`; }

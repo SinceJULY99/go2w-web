@@ -64,6 +64,12 @@ try {
   async function save(name, pts){
     return command('route_save', { map, name, points: pts });
   }
+  const checked = await command('route_check', { map, points });
+  assert.equal(checked.simulated, true);
+  assert.deepEqual(checked.paths.map(p => p.to), [2, 3]);
+  assert.deepEqual(checked.paths[0].points[0], [points[0].x, points[0].y]);
+  assert.deepEqual(checked.paths[1].points.at(-1), [points[2].x, points[2].y]);
+  assert.equal(c.state.armed, false, '检查无需解锁');
   const route = await save('三点测试', points);
   assert.equal((await c.cmd('route_save', { map, name:'非法', points:[first] })).ok, false);
   assert.equal((await c.cmd('route_save', { map:'错误地图', name:'非法', points })).ok, false);
@@ -77,14 +83,19 @@ try {
   await until(() => c.task?.name === '三点任务' && c.task.status === 'succeeded', '到达三个点', 25000);
   assert.deepEqual([...new Set(c.tasks.filter(t => t.name === '三点任务').map(t => t.point))], [1, 2, 3]);
   assert.ok(Math.hypot(c.pose.x - points[2].x, c.pose.y - points[2].y) < .3);
-  console.log('PASS 保存、更新、多客户端同步、按顺序到达三点');
+  console.log('PASS 站间路径、保存、更新、多客户端同步、按顺序到达三点');
 
   const fail = await save('失败时不跳点', [points[2], { x: 100, y: 100, th: 0 }, first]);
+  const failedCheck = await c.cmd('route_check', { map, points:fail.points });
+  assert.equal(failedCheck.ok, false);
+  assert.equal(failedCheck.data.failed, 2);
   await command('route_start', { route_id:fail.id });
   await until(() => c.task?.name === fail.name && c.task.status === 'aborted', '第二点失败');
   assert.equal(c.task.point, 2);
   assert.equal(c.tasks.some(t => t.name === fail.name && t.point === 3), false);
-  console.log('PASS 第二点失败后停止');
+  assert.equal(c.tasks.some(t => t.name === fail.name && t.phase === 'follow'), false);
+  assert.match(c.task.message, /规划检查失败/);
+  console.log('PASS 第二站不可达，出发前拒绝整条任务');
 
   async function safetyCase(name, stop, expectLock){
     await command('initial_pose', first);

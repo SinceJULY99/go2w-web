@@ -6,7 +6,7 @@ import { gridToCanvas, costToCanvas, CLOUD } from '../util.js';
 const T_MAP = 1, T_SCAN = 2, T_GCOST = 3, T_LCOST = 4, T_CLOUD = 5, T_PART = 6;
 // 已接入真机的操作；其余操作给出说明，不发任何指令
 const OPS = new Set(['initialPose', 'goal', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
-  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'saveMap', 'loadMap', 'teleop']);
+  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'checkRoute', 'saveMap', 'loadMap', 'teleop']);
 const NOT_YET = {
   pause: '真机暂不支持暂停：可以取消任务，或者锁定底盘',
 };
@@ -57,13 +57,13 @@ export function createRosSource(store, bus){
     };
   }
 
-  function send(op, args = {}){
+  function send(op, args = {}, timeout = 6000){
     return new Promise(resolve => {
       if (!ws || ws.readyState !== 1) return resolve({ ok: false, msg: '没有连上后端' });
       const id = ++seq;
       pending.set(id, resolve);
       ws.send(JSON.stringify({ t: 'cmd', id, op, ...args }));
-      setTimeout(() => { if (pending.delete(id)) resolve({ ok: false, msg: '后端没有回复（超时）' }); }, 6000);
+      setTimeout(() => { if (pending.delete(id)) resolve({ ok: false, msg: '后端没有回复（超时）' }); }, timeout);
     });
   }
 
@@ -77,7 +77,7 @@ export function createRosSource(store, bus){
     }
     lastTask = t;
     store.task = { ...t, paused: false };
-    store.goal = ['goal', 'route'].includes(t.type) && t.status === 'active' ? t.goal : null;
+    store.goal = ['goal', 'route'].includes(t.type) && t.status === 'active' && t.phase !== 'checking' ? t.goal : null;
   }
 
   function onJson(m){
@@ -191,6 +191,7 @@ export function createRosSource(store, bus){
         ? send('bag_start', { topics: (store.bagTopics || '').trim().split(/\s+/).filter(Boolean) })
         : send('bag_stop')),
     saveRoute: route => send('route_save', route),
+    checkRoute: route => send('route_check', route, 35000),
     startRoute: route_id => send('route_start', { route_id }),
     startPatrol: () => send('start_patrol', { loops: store.patrolLoops ?? 0 }),
     setPatrolPoint: (k, p) => send('patrol_point', { k, ...p }),
@@ -243,7 +244,7 @@ export function createRosSource(store, bus){
       if (!R.valid){ store.scan = new Float32Array(0); store.cloud = []; store.particles = new Float32Array(0); }
       if (store.profiles.navigation !== 'run'){ store.lcostmap = null; store.costmap = null; gcost = null; }
       // 全局路径只在任务进行中显示（Nav2 结束任务时不会发空路径）；已走过的部分按离机器人最近的点区分
-      store.plan = rawPlan && T.status === 'active' ? { pts: rawPlan } : null;
+      store.plan = rawPlan && T.status === 'active' && T.phase !== 'checking' ? { pts: rawPlan } : null;
       if (store.plan && R.valid){
         let best = 0, bd = Infinity;
         rawPlan.forEach((p, i) => { const d = (p[0]-R.x)**2 + (p[1]-R.y)**2; if (d < bd){ bd = d; best = i; } });

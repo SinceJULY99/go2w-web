@@ -67,7 +67,7 @@ export function createMockSource(store, bus){
   store.bags = [{ name:'s7_nav4_162403', dur:1840, size:8120 }, { name:'s7_nav1_114954', dur:612, size:2790 }];
   Object.assign(store.robot, { valid: true, x: 5.6, y: 4.6, th: 0 });
   store.profiles = { mapping: 'stop', localization: 'stop', navigation: 'run', patrol: 'run', bag: 'stop' };
-  store.since = { navigation: -2405, patrol: -380 };
+  store.since = { navigation: -2405 };
   store.loc = { running: true, std: .035, yaw: 1.5, match: 91 };
 
   const R = store.robot, S = { t: 0, paused: false, keys: null, link: true, bagT0: 0 };
@@ -389,7 +389,6 @@ export function createMockSource(store, bus){
   [['INFO','launch','navigation.launch.py: all nodes started'], ['INFO','planar_odom','tilt_source = lowstate (domain 0, best-effort)'],
    ['INFO','amcl','initialPoseReceived, particle cloud converged'], ['INFO','go2w_cmd_bridge','limits vx 0.45 m/s · wz 1.20 rad/s · timeout 0.30 s'],
    ['INFO','go2w_cmd_bridge','ARMED']].forEach(l => log(...l));
-  startPatrol();
   for (let i=0;i<300;i++) step(.05); // 预跑 15 s：一打开就是机器人在路上的状态
   sense(); amclViz(); controllerViz(); syncGraph();
 

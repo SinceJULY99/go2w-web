@@ -396,7 +396,19 @@ class Sim:
         from nav2_msgs.msg import BehaviorTreeLog
         self.node.deliver('/behavior_tree_log', BehaviorTreeLog(events))
 
-    def plan(self, gx, gy):
+    def compute_path(self, goal):
+        from nav_msgs.msg import Path
+        from rclpy._fake import Future
+        p = goal.goal.pose.position
+        a = goal.start.pose.position
+        start = (a.x, a.y) if goal.use_start else (self.x, self.y)
+        points = self.plan(p.x, p.y, start)
+        path = Path([start, *points] if points is not None else [])
+        result = Future()
+        result.set_result(N(status=SUCCEEDED if path.poses else ABORTED, result=N(path=path)))
+        return N(accepted=True, get_result_async=lambda: result)
+
+    def plan(self, gx, gy, start=None):
         """0.2 m 栅格上的 A*，再用细栅格做视线捷径。返回航点列表或 None。"""
         b, C = self.cb, self.coarse
         H, W = C.shape
@@ -417,7 +429,8 @@ class Sim:
                     return best[1]
             return None
 
-        s, t = snap(cell(self.x, self.y)), snap(cell(gx, gy))
+        start = start if start is not None else (self.x, self.y)
+        s, t = snap(cell(*start)), snap(cell(gx, gy))
         if s is None or t is None:
             return None
         openq, came, g = [(0.0, s)], {s: None}, {s: 0.0}
@@ -439,7 +452,7 @@ class Sim:
         while c is not None:
             cells.append(c); c = came[c]
         pts = [(self.ox + (cx+.5)*b*self.res, self.oy + (cy+.5)*b*self.res) for cx, cy in reversed(cells)]
-        pts = [(self.x, self.y)] + pts[1:-1] + [(gx, gy)]
+        pts = [start] + pts[1:-1] + [(gx, gy)]
         out, i = [pts[0]], 0
         while i < len(pts) - 1:
             j = len(pts) - 1

@@ -46,7 +46,7 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from action_msgs.srv import CancelGoal
 from aiohttp import WSMsgType, web
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav2_msgs.msg import BehaviorTreeLog, ParticleCloud
 from nav2_msgs.srv import LoadMap
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
@@ -306,6 +306,7 @@ class Bridge(Node):
 
         self.initpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
         self.nav = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.planner = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
         self.cancel_cli = self.create_client(CancelGoal, '/navigate_to_pose/_action/cancel_goal')
         self.arm_cli = self.create_client(SetBool, f'{BRIDGE}/arm')
         self.pget_cli = self.create_client(GetParameters, f'{BRIDGE}/get_parameters')
@@ -665,13 +666,26 @@ class Bridge(Node):
         m.pose.covariance = cov
         self.initpose_pub.publish(m)
 
+    def stamped_pose(self, x, y, th):
+        p = PoseStamped()
+        p.header.frame_id = 'map'
+        p.header.stamp = self.get_clock().now().to_msg()
+        p.pose.position.x, p.pose.position.y = float(x), float(y)
+        p.pose.orientation.z, p.pose.orientation.w = math.sin(th / 2), math.cos(th / 2)
+        return p
+
     def send_goal(self, x, y, th):
         g = NavigateToPose.Goal()
-        g.pose.header.frame_id = 'map'
-        g.pose.header.stamp = self.get_clock().now().to_msg()
-        g.pose.pose.position.x, g.pose.pose.position.y = float(x), float(y)
-        g.pose.pose.orientation.z, g.pose.pose.orientation.w = math.sin(th / 2), math.cos(th / 2)
+        g.pose = self.stamped_pose(x, y, th)
         return self.nav.send_goal_async(g, feedback_callback=self.on_feedback)
+
+    def compute_path(self, start, goal):
+        g = ComputePathToPose.Goal()
+        g.start = self.stamped_pose(start['x'], start['y'], start['th'])
+        g.goal = self.stamped_pose(goal['x'], goal['y'], goal['th'])
+        g.use_start = True
+        g.planner_id = 'GridBased'
+        return self.planner.send_goal_async(g)
 
     def track_goal(self, handle, pose):
         gid = bytes(handle.goal_id.uuid)
@@ -868,7 +882,8 @@ class Server:
         node.wants = self.wants   # 点云、粒子没人看就不算，省扩展坞的 CPU
         self.sys = SysStats()
         # P3：进程管理。本地调试（GO2W_FAKE_PROCS=1）换成假模拟器里的进程
-        if os.environ.get('GO2W_FAKE_PROCS'):
+        self.simulated = bool(os.environ.get('GO2W_FAKE_PROCS'))
+        if self.simulated:
             from go2w_fake_procs import FakeProcs
             self.procs = FakeProcs(node)
         else:
@@ -897,6 +912,7 @@ class Server:
         self.route_job = None
         self.goal_pending = False
         self.map_loading = False
+        self.checking_route = False
 
     # ---------- 工具 ----------
     def aw(self, fut, timeout=3.0):
@@ -969,6 +985,8 @@ class Server:
         n, op = self.node, d.get('op')
         if ws.closed or ws not in self.clients:
             return False, '网页已断开'
+        if self.checking_route and op in ('goal', 'initial_pose', 'start_patrol', 'route_start'):
+            return False, '正在检查路线，请稍等'
         if self.route_running() and (op in ('goal', 'initial_pose', 'start_patrol')
                                      or (op == 'arm' and d.get('on'))):
             return False, '多点任务进行中：请先取消任务'
@@ -1060,6 +1078,8 @@ class Server:
                 if result[0]:
                     await self.send_all(self.routes_message())
                 return result
+            if op == 'route_check':
+                return await self.check_route(ws, d)
             if op == 'route_start':
                 return self.start_route(ws, d.get('route_id'))
             if op == 'patrol_point':
@@ -1168,6 +1188,70 @@ class Server:
             return f"请先切换到地图 {route['map']}"
         return None
 
+    def cancel_late_goal(self, future):
+        # 请求超时后仍可能被接受。只取消这个迟到的目标。
+        try:
+            handle = future.result()
+            if handle.accepted:
+                handle.cancel_goal_async()
+        except Exception as e:
+            self.node.event('ERROR', f'取消迟到的目标失败：{e}')
+
+    async def plan_route(self, record, start=None, stopped=lambda: False):
+        n, points = self.node, record['points']
+        legs = list(zip(points, points[1:]))
+        if start is not None:
+            legs.insert(0, (start, points[0]))
+        first = 1 if start is not None else 2
+        deadline = time.monotonic() + 30.0
+        paths = []
+        for i, (a, b) in enumerate(legs, first):
+            if stopped():
+                return paths, i, '路线检查已中断'
+            if self.busy or self.map_loading or n.map_current != record['map'] or not n.planner.server_is_ready():
+                return paths, i, '当前地图的 Nav2 规划器不可用'
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return paths, i, '路线检查超时'
+            handle = None
+            request = n.compute_path(a, b)
+            try:
+                handle = await self.aw(request, min(2.0, remaining))
+                if not handle.accepted:
+                    return paths, i, 'Nav2 规划器拒绝了请求'
+                reply = await self.aw(handle.get_result_async(), min(3.0, max(.01, deadline - time.monotonic())))
+                if reply.status != GoalStatus.STATUS_SUCCEEDED or not reply.result.path.poses:
+                    return paths, i, 'Nav2 找不到可行路径'
+            except asyncio.TimeoutError:
+                if handle is None:
+                    request.add_done_callback(self.cancel_late_goal)
+                else:
+                    handle.cancel_goal_async()
+                return paths, i, 'Nav2 规划超时'
+            if stopped() or self.map_loading or self.busy or n.map_current != record['map']:
+                return paths, i, '路线检查已中断'
+            poses = reply.result.path.poses
+            step = max(1, math.ceil(len(poses) / 180))
+            sampled = poses[::step]
+            if sampled[-1] is not poses[-1]:
+                sampled.append(poses[-1])
+            paths.append({'to': i, 'points': [[p.pose.position.x, p.pose.position.y] for p in sampled]})
+        return paths, None, ''
+
+    async def check_route(self, ws, d):
+        record = self.route_record({**d, 'name': '规划检查'}, None)
+        if self.checking_route or self.route_running() or self.goal_pending or self.node.nav_active() or self.teleop is not None or self.prof('patrol') != 'stop':
+            return False, '请先结束当前导航、巡逻、遥控或路线检查'
+        if self.busy or self.map_loading or self.node.map_current != record['map'] or not self.node.planner.server_is_ready():
+            return False, '当前地图的 Nav2 规划器未就绪，路线尚未验证'
+        self.checking_route = True
+        try:
+            paths, failed, reason = await self.plan_route(record, stopped=lambda: ws.closed or self.estop or self.node.nav_active())
+            message = '全部站间路径可规划' if failed is None else f'第 {failed - 1} → {failed} 站：{reason}'
+            return failed is None, message, {'paths': paths, 'failed': failed, 'simulated': self.simulated}
+        finally:
+            self.checking_route = False
+
     def start_route(self, ws, route_id):
         route = self.routes.get(route_id)
         if route is None:
@@ -1180,7 +1264,7 @@ class Server:
             return False, reason
         self.owner = ws
         self.route = {'record': route, 'index': 0, 'status': 'active', 'started': time.monotonic(),
-                      'message': '', 'stop': asyncio.Event(), 'goal': None}
+                      'message': '', 'stop': asyncio.Event(), 'goal': None, 'checking': True}
         self.route_job = asyncio.create_task(self.run_route(ws, self.route))
         return True, f"开始任务：{route['name']}"
 
@@ -1196,6 +1280,19 @@ class Server:
     async def run_route(self, ws, route):
         n, record = self.node, route['record']
         try:
+            pos = n.lookup(BASE_FRAME)
+            if not pos or n.fixed != 'map':
+                raise RuntimeError('无法读取当前位置')
+            start = dict(zip(('x', 'y', 'th'), pos))
+            _, failed, reason = await self.plan_route(record, start, lambda: route['stop'].is_set() or n.nav_active())
+            if route['stop'].is_set():
+                return
+            if failed is not None:
+                route['index'] = failed - 1
+                leg = '当前位置 → 第 1 站' if failed == 1 else f'第 {failed - 1} → {failed} 站'
+                self.finish_route(route, 'aborted', f'{leg}规划检查失败：{reason}')
+                return
+            route['checking'] = False
             for i, point in enumerate(record['points']):
                 if route['stop'].is_set():
                     return
@@ -1208,15 +1305,7 @@ class Server:
                 try:
                     handle = await self.aw(request, 3.0)
                 except asyncio.TimeoutError:
-                    # 超时后仍可能被 Nav2 接受，只取消这个迟到的目标。
-                    def cancel_late(future):
-                        try:
-                            late = future.result()
-                            if late.accepted:
-                                late.cancel_goal_async()
-                        except Exception as e:
-                            n.event('ERROR', f'取消迟到的路线目标失败：{e}')
-                    request.add_done_callback(cancel_late)
+                    request.add_done_callback(self.cancel_late_goal)
                     raise RuntimeError('Nav2 接收目标超时') from None
                 if not handle.accepted:
                     raise RuntimeError('Nav2 拒绝目标')
@@ -1263,8 +1352,10 @@ class Server:
             return goal
         record, i = route['record'], route['index']
         leg = goal if goal and goal['type'] == 'goal' and goal['goal'] == route['goal'] else {}
-        return {**leg, 'type': 'route', 'name': record['name'], 'status': status,
-                'phase': (leg.get('phase') if leg.get('status') == 'active' else 'plan') if status == 'active' else status,
+        phase = status
+        if status == 'active':
+            phase = 'checking' if route['checking'] else leg['phase'] if leg.get('status') == 'active' else 'plan'
+        return {**leg, 'type': 'route', 'name': record['name'], 'status': status, 'phase': phase,
                 'goal': record['points'][i], 'point': i + 1, 'count': len(record['points']),
                 'message': route['message'], 'elapsed': route.get('ended', time.monotonic()) - route['started']}
 
@@ -1479,8 +1570,8 @@ class Server:
     def on_teleop(self, ws, d):
         """网页按住按键时每 0.1 s 发一次；后端 0.3 s 收不到就发零速并停止发布。"""
         n, now = self.node, time.monotonic()
-        if self.route_running():
-            refuse = '多点任务进行中，请先取消任务'
+        if self.route_running() or self.checking_route:
+            refuse = '多点任务或路线检查进行中，请先结束'
         else:
             refuse = '急停中' if self.estop else '底盘锁定中，先解锁' if not n.is_armed() else None
         if refuse:

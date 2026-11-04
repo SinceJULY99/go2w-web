@@ -10,9 +10,14 @@ export function createMapView(store, actions){
   let touched = false; // 用户动过视角后，窗口尺寸变化不再自动适配
   // aim：点了一下位置、还在等第二下确定朝向（点两下 = 按住拖动的替代，触控板更好用）
   const V = { tool: 'pan', measure: [], drag: null, aim: null };
-  const POSE_TOOLS = { init: '初始位姿', goal: '导航目标', A: '巡逻点 A', B: '巡逻点 B', route: '路线点' };
+  const POSE_TOOLS = { init: '初始位姿', goal: '导航目标', A: '巡逻点 A', B: '巡逻点 B' };
   const hint = $('#aimHint');
   function showHint(){
+    if (V.tool === 'route'){
+      hint.hidden = false;
+      hint.textContent = '每点击一次添加一站 · 选完在右侧点「确认路线」';
+      return;
+    }
     const name = POSE_TOOLS[V.tool];
     hint.hidden = !name;
     if (name) hint.innerHTML = V.aim ? `<b>${name}</b> · 移动鼠标选择朝向，再点一下确定 · Esc 取消` : `<b>${name}</b> · 点一下选位置，再点一下定朝向（也可以按住拖动）`;
@@ -135,15 +140,20 @@ export function createMapView(store, actions){
     if (store.patrol.B) drawPin(store.patrol.B, 'B', '#f2f6fb');
     const draft = store.routeDraft;
     if (draft.map && draft.map === store.mapCurrent && draft.points.length){
-      ctx.save();
-      ctx.strokeStyle = 'rgba(255,224,138,.65)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 4]);
-      ctx.beginPath();
-      draft.points.forEach((p, i) => i ? ctx.lineTo(sx(p.x), sy(p.y)) : ctx.moveTo(sx(p.x), sy(p.y)));
-      ctx.stroke();
-      ctx.restore();
-      draft.points.forEach((p, i) => drawPin(p, String(i + 1), '#ffe08a'));
+      const check = store.routeCheck;
+      if (check?.draft === draft && check.paths?.length){
+        ctx.save();
+        ctx.strokeStyle = '#94e8a8';
+        ctx.lineWidth = 2;
+        for (const leg of check.paths){
+          ctx.beginPath();
+          leg.points.forEach(([x, y], i) => i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)));
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+      draft.points.forEach((p, i) => drawPin(p, String(i + 1),
+        draft.confirmed && i === draft.points.length - 1 ? '#94e8a8' : '#ffe08a'));
     }
     if (store.goal) drawGoal(store.goal);
     if (R.valid) drawRobot();
@@ -158,7 +168,7 @@ export function createMapView(store, actions){
         ctx.fillStyle = 'rgba(6,11,18,.9)'; ctx.beginPath(); ctx.roundRect(mx-tw/2, my-24, tw, 20, 5); ctx.fill();
         ctx.fillStyle = '#ffe08a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, mx, my-14); }
       ctx.restore(); }
-    const d = V.drag && V.drag.moved && V.drag.tool!=='pan' ? V.drag : V.aim;
+    const d = V.drag && V.drag.moved && POSE_TOOLS[V.drag.tool] ? V.drag : V.aim;
     if (d){
       const col = d.tool==='init' ? '#6fb6ff' : d.tool==='goal' ? ACC : '#f2f6fb';
       const X0 = sx(d.x0), Y0 = sy(d.y0), dx = sx(d.x1)-X0, dy = sy(d.y1)-Y0, len = Math.hypot(dx, dy);
@@ -176,7 +186,7 @@ export function createMapView(store, actions){
   const TOOLS = ['pan','init','goal','A','B','measure','route'];
   function setTool(tool, onTeleop){
     if (tool==='teleop' && V.tool!=='teleop' && onTeleop && !onTeleop()) return;
-    V.tool = tool; $$('.tool').forEach(b => b.classList.toggle('on', b.dataset.tool===tool));
+    V.tool = tool; $$('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool===tool));
     $('#teleHint').hidden = tool!=='teleop'; if (tool!=='measure') V.measure = [];
     V.aim = null; showHint();
     cv.style.cursor = tool==='pan' ? 'grab' : tool==='teleop' ? 'default' : 'crosshair';
@@ -189,12 +199,12 @@ export function createMapView(store, actions){
     const p = { x, y, th };
     if (tool==='init') actions.initialPose(p);
     else if (tool==='goal') actions.goal(p);
-    else if (tool==='route') actions.routePoint(p);
     else actions.patrolPoint(tool, p);
   }
   const local = e => { const r = cv.getBoundingClientRect(); return [e.clientX-r.left, e.clientY-r.top]; };
   const stopFollow = () => { touched = true; view.follow = false; $('#vFollow').classList.remove('on'); };
   cv.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.button !== 1) return;
     const [px, py] = local(e); cv.setPointerCapture(e.pointerId);
     if (V.tool==='pan' || V.tool==='teleop' || e.button===1){ V.drag = { tool:'pan', px, py, cx:view.cx, cy:view.cy }; cv.style.cursor = 'grabbing'; stopFollow(); return; }
     if (V.tool==='measure'){ const p = { x:wx(px), y:wy(py) }; V.measure = V.measure.length>=2 ? [p] : [...V.measure, p]; return; }
@@ -214,6 +224,11 @@ export function createMapView(store, actions){
   cv.addEventListener('pointerup', () => {
     const d = V.drag; if (!d) return; V.drag = null;
     if (d.tool==='pan'){ cv.style.cursor = V.tool==='pan' ? 'grab' : 'default'; return; }
+    if (d.tool === 'route'){
+      if (d.moved) return;
+      if (!inMap(d.x0, d.y0)) return toast('位置在地图范围之外', 'err');
+      return actions.routePoint({ x:d.x0, y:d.y0, th:0 });
+    }
     if (d.moved) return commit(d.tool, d.x0, d.y0, d.x1, d.y1);           // 按住拖动
     if (!inMap(d.x0, d.y0)) return toast('位置在地图范围之外', 'err');
     V.aim = { tool: d.tool, x0: d.x0, y0: d.y0, x1: d.x0, y1: d.y0 }; showHint(); // 点了一下：等第二下

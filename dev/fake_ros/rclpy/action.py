@@ -2,7 +2,7 @@ from rclpy._fake import Future
 
 
 class ActionClient:
-    """只支持 go2w_web 用到的 navigate_to_pose：发目标、反馈、结果。"""
+    """模拟网页用到的导航和路径检查 action。"""
 
     def __init__(self, node, _type, name):
         self.node, self.name = node, name
@@ -14,5 +14,8 @@ class ActionClient:
     def send_goal_async(self, goal, feedback_callback=None):
         fut = Future()
         sim = self.node.fake_sim
-        sim.later(lambda: fut.set_result(sim.nav_send_goal(goal, feedback_callback)))
+        if self.name == 'compute_path_to_pose':
+            sim.later(lambda: fut.set_result(sim.compute_path(goal)))
+        else:
+            sim.later(lambda: fut.set_result(sim.nav_send_goal(goal, feedback_callback)))
         return fut

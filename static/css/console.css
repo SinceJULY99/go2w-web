@@ -364,3 +364,8 @@ input[type=range]{width:100%;accent-color:var(--accent);height:4px}
 .route-points li{display:flex;align-items:center;gap:4px;margin-top:4px}
 .route-points span{flex:1;font:11px var(--f-mono)}
 .route-points .btn{padding:0 6px}
+.route-controls{margin-top:8px}
+.route-points .route-end{color:#94e8a8}
+.legacy-patrol{margin-top:10px}
+.legacy-patrol summary{cursor:pointer;font-size:11px;color:var(--muted);margin-bottom:6px}
+.legacy-patrol .btn.on{border-color:var(--accent);color:var(--accent)}

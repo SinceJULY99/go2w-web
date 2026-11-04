@@ -40,11 +40,18 @@ export function createActions(store, src){
       if (draft.map && draft.map !== map) return toast('路线属于另一张地图，请先新建路线', 'err');
       if (draft.points.length >= 50) return toast('每条路线最多 50 个点', 'err');
       if (store.costAt && blocked(store.costAt(p.x, p.y))) return toast('该位置在障碍物或膨胀区内', 'err');
-      store.routeDraft = { ...draft, map, points: [...draft.points, p] };
+      const last = draft.points.at(-1);
+      if (last && Math.hypot(p.x - last.x, p.y - last.y) < .05) return toast('这一站已添加', 'warn');
+      store.routeDraft = { ...draft, map, points: [...draft.points, p], confirmed: false };
       document.getElementById('routesPanel').open = true;
     },
+    checkRoute(draft){
+      if (src.name !== 'ros') return Promise.resolve({ ok:false, msg:'纯前端模拟，尚未用 Nav2 检查路径' });
+      return src.cmd.checkRoute({ map:draft.map, points:draft.points });
+    },
     saveRoute(name){
-      const { id, map, points } = store.routeDraft;
+      const { id, map, points, confirmed } = store.routeDraft;
+      if (!confirmed) return toast('请先确认路线', 'err');
       if (!name.trim() || points.length < 2 || map !== store.mapCurrent) return toast('请在当前地图添加至少两个点，并填写任务名', 'err');
       return exec(src.cmd.saveRoute({ route_id: id, name, map, points }), '任务已保存');
     },

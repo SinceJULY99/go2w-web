@@ -19,7 +19,7 @@ bus.on('toast', (m, k) => toast(m, k));
 const src = mock ? createMockSource(store, bus) : createRosSource(store, bus);
 const actions = createActions(store, src);
 const mapView = createMapView(store, actions);
-const panels = createPanels(store, src, actions, mapView, bus);
+const panels = createPanels(store, src, actions, mapView, bus, setTool);
 const replay = early.splice(0); bus.h.log.shift(); replay.forEach(a => bus.emit('log', ...a));
 bus.on('map', () => mapView.fit());
 // 调试用：地址加 ?debug 时可以在浏览器控制台里用 go2w.store / go2w.actions
@@ -40,9 +40,13 @@ function enterTeleop(){
 }
 function setTool(t){
   if (mapView.tool === 'teleop' && t !== 'teleop'){ for (const k in keys) keys[k] = false; $$('.keys kbd').forEach(x => x.classList.remove('dn')); if (src.can('teleop')) src.cmd.teleop(null); }
+  if (t === 'route'){
+    document.getElementById('routesPanel').open = true;
+    if (document.body.classList.contains('right-off')) panels.toggleRight();
+  }
   mapView.setTool(t, enterTeleop);
 }
-document.getElementById('toolbar').onclick = e => { const b = e.target.closest('[data-tool]'); if (b) setTool(b.dataset.tool); };
+$$('[data-tool]').forEach(button => { button.onclick = () => setTool(button.dataset.tool); });
 window.addEventListener('keydown', e => {
   if (e.target.closest('input,select,textarea')) return;
   const k = e.key.toLowerCase();
