@@ -215,7 +215,7 @@ export function createMockSource(store, bus){
       goal: task.goal, loop: task.loop, loops: store.patrol.loops, leg: task.leg };
     if (task.type === 'route'){
       Object.assign(store.task, { name:task.route.name, point:task.index + 1, count:task.route.points.length,
-        message:task.message, elapsed:(task.doneAt ?? S.t) - task.started });
+        message:task.message, routeId:task.route.id, pointName:task.goal.name, elapsed:(task.doneAt ?? S.t) - task.started });
     }
   }
 
@@ -307,7 +307,7 @@ export function createMockSource(store, bus){
     },
     saveRoute({ route_id, name, map, points }){
       const id = route_id || globalThis.crypto?.randomUUID?.() || `mock-${Date.now()}-${Math.random()}`;
-      const record = { id, name:name.trim(), map, points };
+      const record = { id, name:name.trim(), map, points:points.map(p => ({ ...p, name:(p.name || '').trim() })) };
       const routes = route_id ? store.routes.map(r => r.id === id ? record : r) : [...store.routes, record];
       try {
         localStorage.setItem(routesKey, JSON.stringify(routes));
@@ -316,6 +316,18 @@ export function createMockSource(store, bus){
       }
       store.routes = routes;
       return { ok:true, data:record };
+    },
+    deleteRoute(id){
+      if (routeActive() && task.route.id === id) return { ok:false, msg:'请先结束正在执行的任务' };
+      const routes = store.routes.filter(r => r.id !== id);
+      if (routes.length === store.routes.length) return { ok:false, msg:'找不到要删除的任务' };
+      try {
+        localStorage.setItem(routesKey, JSON.stringify(routes));
+      } catch {
+        return { ok:false, msg:'浏览器无法删除模拟任务' };
+      }
+      store.routes = routes;
+      return { ok:true };
     },
     startRoute(id){
       const route = store.routes.find(r => r.id === id);

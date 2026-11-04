@@ -5,7 +5,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const url = process.argv[2] || 'ws://127.0.0.1:8080/ws';
 assert.match(url, /^ws:\/\/(127\.0\.0\.1|localhost):\d+\/ws$/);
 const map = 'lab_20261021', first = { x: .01, y: 0, th: 0 };
-const points = [first, { x: .11, y: -.70, th: -Math.PI / 2 }, { x: .21, y: -1.35, th: -Math.PI / 2 }];
+const points = [
+  { ...first, name:'入口', manualHeading:false },
+  { x:.11, y:-.70, th:-Math.PI / 2, name:'走廊', manualHeading:true },
+  { x:.21, y:-1.35, th:-Math.PI / 2, name:'工位', manualHeading:true },
+];
 
 async function client(){
   const ws = new WebSocket(url), replies = new Map(), tasks = [];
@@ -76,6 +80,10 @@ try {
   assert.equal((await c.cmd('route_start', { route_id:route.id })).ok, false, '上锁时拒绝执行');
   const edited = await command('route_save', { route_id:route.id, map, name:'三点任务', points });
   assert.equal(edited.id, route.id);
+  assert.deepEqual(edited.points, points, '保存并更新后仍保留站名和朝向');
+  assert.equal((await c.cmd('route_save', {
+    map, name:'非法站名', points:[{ ...first, name:'长'.repeat(41) }, points[1]],
+  })).ok, false);
   await until(() => observer.routes?.some(r => r.id === route.id && r.name === '三点任务'), '另一客户端收到更新');
   await command('initial_pose', first);
   await command('arm', { on:true });
@@ -83,6 +91,11 @@ try {
   await until(() => c.task?.name === '三点任务' && c.task.status === 'succeeded', '到达三个点', 25000);
   assert.deepEqual([...new Set(c.tasks.filter(t => t.name === '三点任务').map(t => t.point))], [1, 2, 3]);
   assert.ok(Math.hypot(c.pose.x - points[2].x, c.pose.y - points[2].y) < .3);
+  assert.deepEqual([...new Set(c.tasks.filter(t => t.name === '三点任务').map(t => t.pointName))], ['入口', '走廊', '工位']);
+  await command('route_delete', { route_id:route.id });
+  await until(() => observer.routes && !observer.routes.some(r => r.id === route.id), '另一客户端收到删除');
+  assert.equal((await c.cmd('route_start', { route_id:route.id })).ok, false);
+  console.log('PASS 站名和自定义朝向保存、执行进度显示站名、任务删除同步');
   console.log('PASS 站间路径、保存、更新、多客户端同步、按顺序到达三点');
 
   const fail = await save('失败时不跳点', [points[2], { x: 100, y: 100, th: 0 }, first]);
@@ -105,6 +118,7 @@ try {
     await until(() => observer.task?.name === r.name && observer.task.status === 'active' &&
       observer.task.phase === 'follow', `${name}开始跟随`);
     assert.equal((await observer.cmd('goal', first)).ok, false, '执行中拒绝其他网页抢发目标');
+    assert.equal((await observer.cmd('route_delete', { route_id:r.id })).ok, false, '运行中拒绝删除当前任务');
     await stop();
     await until(() => observer.task?.name === r.name && observer.task.status === 'canceled', `${name}后取消任务`);
     if (expectLock) await until(() => observer.state.armed === false, `${name}后上锁`);

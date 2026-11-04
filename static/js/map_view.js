@@ -15,7 +15,7 @@ export function createMapView(store, actions){
   function showHint(){
     if (V.tool === 'route'){
       hint.hidden = false;
-      hint.textContent = '每点击一次添加一站 · 选完在右侧点「确认路线」';
+      hint.textContent = '点击添加一站 · 按住拖拽指定到站朝向';
       return;
     }
     const name = POSE_TOOLS[V.tool];
@@ -39,12 +39,12 @@ export function createMapView(store, actions){
   }
 
   function polyline(arr, step = 2){ ctx.beginPath(); for (let i=0;i<arr.length;i+=step){ const x = sx(arr[i]), y = sy(arr[i+1]); i ? ctx.lineTo(x,y) : ctx.moveTo(x,y); } }
-  function drawPin(p, label, col){
+  function drawPin(p, label, col, showHeading = true){
     const x = sx(p.x), y = sy(p.y);
     ctx.save(); ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5;
     ctx.globalAlpha = .25; ctx.beginPath(); ctx.arc(x, y, 10, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
     ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(-p.th)*20, y + Math.sin(-p.th)*20); ctx.stroke();
+    if (showHeading){ ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(-p.th)*20, y + Math.sin(-p.th)*20); ctx.stroke(); }
     ctx.fillStyle = '#04070c'; ctx.beginPath(); ctx.roundRect(x-9, y-32, 18, 18, 4); ctx.fill(); ctx.stroke();
     ctx.fillStyle = col; ctx.font = '600 11px "Chakra Petch",sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, x, y-23);
     ctx.beginPath(); ctx.moveTo(x, y-14); ctx.lineTo(x, y-4); ctx.stroke(); ctx.restore();
@@ -153,7 +153,7 @@ export function createMapView(store, actions){
         ctx.restore();
       }
       draft.points.forEach((p, i) => drawPin(p, String(i + 1),
-        draft.confirmed && i === draft.points.length - 1 ? '#94e8a8' : '#ffe08a'));
+        draft.confirmed && i === draft.points.length - 1 ? '#94e8a8' : '#ffe08a', draft.confirmed || p.manualHeading !== false));
     }
     if (store.goal) drawGoal(store.goal);
     if (R.valid) drawRobot();
@@ -168,9 +168,9 @@ export function createMapView(store, actions){
         ctx.fillStyle = 'rgba(6,11,18,.9)'; ctx.beginPath(); ctx.roundRect(mx-tw/2, my-24, tw, 20, 5); ctx.fill();
         ctx.fillStyle = '#ffe08a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, mx, my-14); }
       ctx.restore(); }
-    const d = V.drag && V.drag.moved && POSE_TOOLS[V.drag.tool] ? V.drag : V.aim;
+    const d = V.drag && V.drag.moved && (V.drag.tool === 'route' || POSE_TOOLS[V.drag.tool]) ? V.drag : V.aim;
     if (d){
-      const col = d.tool==='init' ? '#6fb6ff' : d.tool==='goal' ? ACC : '#f2f6fb';
+      const col = d.tool==='init' ? '#6fb6ff' : d.tool==='goal' ? ACC : d.tool==='route' ? '#ffe08a' : '#f2f6fb';
       const X0 = sx(d.x0), Y0 = sy(d.y0), dx = sx(d.x1)-X0, dy = sy(d.y1)-Y0, len = Math.hypot(dx, dy);
       // 箭头至少 30 px 长；鼠标还没离开起点时先朝右画
       const X1 = len < 1 ? X0+30 : X0 + dx*Math.max(1, 30/len), Y1 = len < 1 ? Y0 : Y0 + dy*Math.max(1, 30/len);
@@ -225,9 +225,9 @@ export function createMapView(store, actions){
     const d = V.drag; if (!d) return; V.drag = null;
     if (d.tool==='pan'){ cv.style.cursor = V.tool==='pan' ? 'grab' : 'default'; return; }
     if (d.tool === 'route'){
-      if (d.moved) return;
       if (!inMap(d.x0, d.y0)) return toast('位置在地图范围之外', 'err');
-      return actions.routePoint({ x:d.x0, y:d.y0, th:0 });
+      const th = d.moved ? Math.atan2(d.y1 - d.y0, d.x1 - d.x0) : 0;
+      return actions.routePoint({ x:d.x0, y:d.y0, th, manualHeading:d.moved });
     }
     if (d.moved) return commit(d.tool, d.x0, d.y0, d.x1, d.y1);           // 按住拖动
     if (!inMap(d.x0, d.y0)) return toast('位置在地图范围之外', 'err');

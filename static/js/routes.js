@@ -1,8 +1,8 @@
-import { $ } from './util.js';
+import { $, deg } from './util.js';
 
 export function setupRouteEditor(store, actions, setTool){
   const select = $('#routeSelect'), name = $('#routeName'), list = $('#routePoints');
-  const save = $('#routeSave'), run = $('#routeRun'), hint = $('#routeHint');
+  const save = $('#routeSave'), run = $('#routeRun'), hint = $('#routeHint'), remove = $('#routeDelete');
   const confirm = $('#routeConfirm'), check = $('#routeCheck'), saveRow = $('#routeSaveRow');
   let lastRoutes, lastDraft, savedDraft = store.routeDraft, saving = false;
   const selected = () => store.routes.find(route => route.id === select.value);
@@ -28,10 +28,19 @@ export function setupRouteEditor(store, actions, setTool){
   select.onchange = () => { edit(selected()); setTool('pan'); render(); };
   $('#routeNew').onclick = () => { select.value = ''; edit(); setTool('route'); render(); };
   run.onclick = () => actions.startRoute(selected());
+  remove.onclick = () => {
+    const route = selected();
+    if (!route) return;
+    actions.deleteRoute(route, () => {
+      if (store.routeDraft.id === route.id) edit();
+      render();
+    });
+  };
   confirm.onclick = () => {
     const draft = store.routeDraft, points = draft.points;
     // 沿着路线给每站一个默认朝向。首站朝向下一站，之后各站沿上一段的方向到达。
     const oriented = points.map((p, i) => {
+      if (p.manualHeading !== false) return p;
       const a = points[Math.max(0, i - 1)], b = i === 0 ? points[1] : p;
       return { ...p, th: Math.atan2(b.y - a.y, b.x - a.x) };
     });
@@ -66,9 +75,14 @@ export function setupRouteEditor(store, actions, setTool){
   };
 
   function render(){
-    const draft = store.routeDraft;
+    let draft = store.routeDraft;
     if (store.routes !== lastRoutes){
       lastRoutes = store.routes;
+      if (draft.id && !store.routes.some(r => r.id === draft.id)){
+        if (draft === savedDraft && name.value === (savedDraft.name || '')) edit();
+        else store.routeDraft = { ...draft, id:null };
+        draft = store.routeDraft;
+      }
       const options = store.routes.map(r => new Option(`${r.name} · ${r.map}`, r.id));
       select.replaceChildren(new Option('选择已保存任务', ''), ...options);
       select.value = draft.id || '';
@@ -78,16 +92,37 @@ export function setupRouteEditor(store, actions, setTool){
       list.replaceChildren(...draft.points.map((p, i) => {
         const li = document.createElement('li'), label = document.createElement('span');
         const end = draft.confirmed && i === draft.points.length - 1;
-        label.textContent = `${i + 1} 号点${end ? ' · 终点' : ''}（${p.x.toFixed(1)}, ${p.y.toFixed(1)}）`;
+        const angle = `${Math.round(deg(p.th))}°`;
+        const heading = p.manualHeading === false ? (draft.confirmed ? `自动 ${angle}` : '自动朝向') : angle;
+        label.textContent = `${i + 1} 号点${end ? ' · 终点' : ''} · ${heading}`;
+        label.title = `坐标 (${p.x.toFixed(2)}, ${p.y.toFixed(2)}) · ${heading}`;
         label.classList.toggle('route-end', end);
+        const pointName = document.createElement('input');
+        pointName.type = 'text';
+        pointName.className = 'route-point-name';
+        pointName.maxLength = 40;
+        pointName.placeholder = `第 ${i + 1} 站名称（可选）`;
+        pointName.setAttribute('aria-label', pointName.placeholder);
+        pointName.value = p.name || '';
+        pointName.oninput = () => {
+          const current = store.routeDraft;
+          const points = current.points.map((point, j) => j === i ? { ...point, name:pointName.value } : point);
+          const renamed = { ...current, points };
+          store.routeDraft = renamed;
+          // 名称不影响路径。保留规划结果和输入框焦点。
+          if (store.routeCheck?.draft === current) store.routeCheck.draft = renamed;
+          if (lastDraft === current) lastDraft = renamed;
+          render();
+        };
         const button = (text, title, action, disabled = false) => {
           const b = document.createElement('button');
           b.className = 'btn sm'; b.textContent = text; b.title = title;
           b.setAttribute('aria-label', title); b.disabled = disabled;
           b.onclick = () => {
-            const points = [...draft.points];
+            const current = store.routeDraft;
+            const points = [...current.points];
             action(points);
-            store.routeDraft = { ...draft, points, confirmed:false };
+            store.routeDraft = { ...current, points, confirmed:false };
             render();
           };
           return b;
@@ -95,7 +130,7 @@ export function setupRouteEditor(store, actions, setTool){
         const move = target => points => { [points[i], points[target]] = [points[target], points[i]]; };
         li.append(label, button('↑', '上移第 ' + (i + 1) + ' 点', move(i - 1), i === 0),
           button('↓', '下移第 ' + (i + 1) + ' 点', move(i + 1), i === draft.points.length - 1),
-          button('×', '删除第 ' + (i + 1) + ' 点', points => points.splice(i, 1)));
+          button('×', '删除第 ' + (i + 1) + ' 点', points => points.splice(i, 1)), pointName);
         return li;
       }));
     }
@@ -103,6 +138,9 @@ export function setupRouteEditor(store, actions, setTool){
     const dirty = draft !== savedDraft || name.value !== (savedDraft.name || '');
     const matching = draft.map && draft.map === store.mapCurrent;
     const running = store.task.type !== 'idle' && store.task.status === 'active';
+    const route = selected();
+    remove.hidden = !route;
+    remove.disabled = saving || (running && store.task.routeId === route?.id);
     confirm.hidden = draft.confirmed;
     confirm.disabled = !matching || draft.points.length < 2;
     check.hidden = !draft.confirmed;
@@ -110,7 +148,7 @@ export function setupRouteEditor(store, actions, setTool){
     saveRow.hidden = !draft.confirmed;
     save.disabled = saving || !matching || !draft.confirmed || !name.value.trim();
     run.disabled = saving || !!preview?.pending || dirty || !matching || !selected() || running || !actions.canMove();
-    let message = '用地图工具栏的「导航点」连续点击选点，至少选两站。';
+    let message = '用「导航点」单击加点，拖拽可指定朝向。至少选两站。';
     if (draft.map && !matching) message = `路线属于地图 ${draft.map}，请先切图。`;
     else if (!draft.confirmed && draft.points.length >= 2) message = '选完后点击「确认路线」，最后一站将标为终点。';
     else if (draft.confirmed){

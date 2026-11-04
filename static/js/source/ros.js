@@ -6,7 +6,7 @@ import { gridToCanvas, costToCanvas, CLOUD } from '../util.js';
 const T_MAP = 1, T_SCAN = 2, T_GCOST = 3, T_LCOST = 4, T_CLOUD = 5, T_PART = 6;
 // 已接入真机的操作；其余操作给出说明，不发任何指令
 const OPS = new Set(['initialPose', 'goal', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
-  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'checkRoute', 'saveMap', 'loadMap', 'teleop']);
+  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'checkRoute', 'deleteRoute', 'saveMap', 'loadMap', 'teleop']);
 const NOT_YET = {
   pause: '真机暂不支持暂停：可以取消任务，或者锁定底盘',
 };
@@ -192,6 +192,7 @@ export function createRosSource(store, bus){
         : send('bag_stop')),
     saveRoute: route => send('route_save', route),
     checkRoute: route => send('route_check', route, 35000),
+    deleteRoute: route_id => send('route_delete', { route_id }),
     startRoute: route_id => send('route_start', { route_id }),
     startPatrol: () => send('start_patrol', { loops: store.patrolLoops ?? 0 }),
     setPatrolPoint: (k, p) => send('patrol_point', { k, ...p }),

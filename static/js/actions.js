@@ -55,6 +55,13 @@ export function createActions(store, src){
       if (!name.trim() || points.length < 2 || map !== store.mapCurrent) return toast('请在当前地图添加至少两个点，并填写任务名', 'err');
       return exec(src.cmd.saveRoute({ route_id: id, name, map, points }), '任务已保存');
     },
+    deleteRoute(route, onDeleted){
+      confirmBox({ title:'删除任务', body:`确定删除「${route.name}」？`, ok:'删除', danger:true,
+        onOk: async () => {
+          const reply = await exec(src.cmd.deleteRoute(route.id), '任务已删除');
+          if (reply?.ok) onDeleted();
+        } });
+    },
     startRoute(route){
       if (!canMove()) return toast('请先启动导航、确认定位正常并解锁底盘', 'err');
       if (!route || route.map !== store.mapCurrent) return toast('请选择当前地图的路线任务', 'err');

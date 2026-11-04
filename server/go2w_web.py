@@ -1073,8 +1073,8 @@ class Server:
                 return False, f'参数没有生效：{res.reason}'
             if op == 'set_mode':
                 return self.set_mode(d.get('mode'), d.get('map'))
-            if op == 'route_save':
-                result = self.save_route(d)
+            if op in ('route_save', 'route_delete'):
+                result = self.save_route(d) if op == 'route_save' else self.delete_route(d.get('route_id'))
                 if result[0]:
                     await self.send_all(self.routes_message())
                 return result
@@ -1135,13 +1135,20 @@ class Server:
             raise ValueError('需要绑定地图')
         if not isinstance(points, list) or not 2 <= len(points) <= 50:
             raise ValueError('每条路线需要 2–50 个点')
+        clean = []
         for point in points:
             if not isinstance(point, dict) or any(
                 type(point.get(k)) not in (float, int) or not math.isfinite(point[k]) for k in ('x', 'y', 'th')
             ):
                 raise ValueError('路线包含无效坐标')
-        return {'id': route_id, 'name': name.strip(), 'map': map_name,
-                'points': [{k: p[k] for k in ('x', 'y', 'th')} for p in points]}
+            label, manual = point.get('name', ''), point.get('manualHeading', True)
+            if not isinstance(label, str) or len(label.strip()) > 40:
+                raise ValueError('站点名称最多 40 个字符')
+            if type(manual) is not bool:
+                raise ValueError('站点朝向类型无效')
+            clean.append({'x': point['x'], 'y': point['y'], 'th': point['th'],
+                          'name': label.strip(), 'manualHeading': manual})
+        return {'id': route_id, 'name': name.strip(), 'map': map_name, 'points': clean}
 
     def save_route(self, d):
         if self.routes_error:
@@ -1153,7 +1160,22 @@ class Server:
             return False, '找不到要更新的任务'
         route_id = route_id or uuid.uuid4().hex
         record = self.route_record(d, route_id)
-        routes = {**self.routes, route_id: record}
+        self.write_routes({**self.routes, route_id: record})
+        return True, f"已保存任务：{record['name']}", record
+
+    def delete_route(self, route_id):
+        if self.routes_error:
+            return False, '任务文件读取失败，请检查后端日志'
+        if route_id not in self.routes:
+            return False, '找不到要删除的任务'
+        if self.route_running() and self.route['record']['id'] == route_id:
+            return False, '请先结束正在执行的任务'
+        routes = dict(self.routes)
+        record = routes.pop(route_id)
+        self.write_routes(routes)
+        return True, f"已删除任务：{record['name']}"
+
+    def write_routes(self, routes):
         os.makedirs(DATA, exist_ok=True)
         tmp = None
         try:
@@ -1165,7 +1187,6 @@ class Server:
             if tmp and os.path.exists(tmp):
                 os.unlink(tmp)
         self.routes = routes
-        return True, f"已保存任务：{record['name']}", record
 
     def routes_message(self):
         return json.dumps({'t': 'routes', 'items': list(self.routes.values())})
@@ -1313,7 +1334,7 @@ class Server:
                     await self.aw(handle.cancel_goal_async(), 2.0)
                     return
                 result = n.track_goal(handle, pose)
-                route['goal'] = point
+                route['goal'] = dict(zip(('x', 'y', 'th'), pose))
                 stop = asyncio.create_task(route['stop'].wait())
                 done = asyncio.create_task(self.aw(result, 180.0))
                 try:
@@ -1357,6 +1378,7 @@ class Server:
             phase = 'checking' if route['checking'] else leg['phase'] if leg.get('status') == 'active' else 'plan'
         return {**leg, 'type': 'route', 'name': record['name'], 'status': status, 'phase': phase,
                 'goal': record['points'][i], 'point': i + 1, 'count': len(record['points']),
+                'routeId': record['id'], 'pointName': record['points'][i]['name'],
                 'message': route['message'], 'elapsed': route.get('ended', time.monotonic()) - route['started']}
 
     # ---------- P3：运行档位、巡逻、录包、地图 ----------
