@@ -384,6 +384,19 @@ export function createPanels(store, src, actions, mapView, bus){
     $('#logFilters').style.visibility = b.dataset.pane==='pLogs' ? 'visible' : 'hidden'; $('#drawer').classList.remove('collapsed'); });
   $('#drawerToggle').onclick = () => $('#drawer').classList.toggle('collapsed');
 
+  // 机器人照片：依次试 img/go2w.jpg / .png / .webp，都没有就保留图标
+  (function loadPhoto(exts){
+    if (!exts.length) return;
+    const probe = new Image();
+    probe.onload = () => {
+      $$('.robot-img').forEach(el => { el.src = probe.src; el.hidden = false; });
+      $$('.robot-fallback').forEach(el => el.style.display = 'none');
+      document.body.classList.add('has-photo');
+    };
+    probe.onerror = () => loadPhoto(exts.slice(1));
+    probe.src = `img/go2w.${exts[0]}`;
+  })(['jpg', 'png', 'webp']);
+
   const badge = $('#srcBadge'); badge.dataset.s = src.name; badge.textContent = ros ? '实时 · ROS 2' : '模拟数据';
   renderLayers();
 

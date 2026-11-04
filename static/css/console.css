@@ -91,6 +91,12 @@ body.left-off #leftToggle svg,body.right-off #rightToggle svg{transform:rotate(1
 /* robot card */
 .robot{display:grid;grid-template-columns:64px 1fr;gap:12px;align-items:center}
 .robot-ico{width:64px;height:64px;border-radius:10px;background:radial-gradient(circle at 50% 60%,rgba(56,225,220,.18),transparent 70%),var(--panel);border:1px solid var(--line);display:grid;place-items:center}
+/* 有照片（web/static/img/go2w.jpg）时：卡片换成横向照片，标题旁换成方形照片 */
+.robot-ico{overflow:hidden}
+.robot-photo{width:100%;height:100%;object-fit:cover;display:block}
+body.has-photo .robot{grid-template-columns:104px 1fr}
+body.has-photo .robot-ico{width:104px;height:78px;background:var(--panel)}
+.brand-photo{width:30px;height:30px;border-radius:8px;object-fit:cover;border:1px solid var(--line-2);display:block}
 .robot-name{font-family:var(--f-display);font-weight:700;font-size:18px;letter-spacing:.04em}
 .robot-sub{color:var(--muted);font-size:11px;margin-top:2px}
 .stat4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:12px}

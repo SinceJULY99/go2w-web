@@ -1450,8 +1450,9 @@ class Server:
         app = web.Application(middlewares=[no_cache])
         app.router.add_get('/', self.index)
         app.router.add_get('/ws', self.ws)
-        for sub in ('css', 'js'):
-            app.router.add_static(f'/{sub}/', os.path.join(self.static_dir, sub))
+        for sub in ('css', 'js', 'img'):   # img/：机器人照片（可选，见 static/img/README.md）
+            if os.path.isdir(os.path.join(self.static_dir, sub)):
+                app.router.add_static(f'/{sub}/', os.path.join(self.static_dir, sub))
 
         async def start(a):
             a['tasks'] = [asyncio.create_task(self.broadcast()), asyncio.create_task(self.safety()),
