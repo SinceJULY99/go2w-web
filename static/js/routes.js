@@ -4,7 +4,8 @@ export function setupRouteEditor(store, actions, setTool){
   const select = $('#routeSelect'), name = $('#routeName'), list = $('#routePoints');
   const save = $('#routeSave'), run = $('#routeRun'), hint = $('#routeHint'), remove = $('#routeDelete');
   const confirm = $('#routeConfirm'), check = $('#routeCheck'), saveRow = $('#routeSaveRow');
-  let lastRoutes, lastDraft, savedDraft = store.routeDraft, saving = false;
+  const runHint = $('#routeRunHint');
+  let lastRoutes, lastDraft, savedDraft = store.routeDraft, saving = false, starting = false;
   const selected = () => store.routes.find(route => route.id === select.value);
 
   function edit(route = null){
@@ -27,7 +28,18 @@ export function setupRouteEditor(store, actions, setTool){
 
   select.onchange = () => { edit(selected()); setTool('pan'); render(); };
   $('#routeNew').onclick = () => { select.value = ''; edit(); setTool('route'); render(); };
-  run.onclick = () => actions.startRoute(selected());
+  run.onclick = async () => {
+    if (run.disabled) return;
+    const route = selected();
+    starting = true;
+    render();
+    try {
+      await actions.startRoute(route);
+    } finally {
+      starting = false;
+      render();
+    }
+  };
   remove.onclick = () => {
     const route = selected();
     if (!route) return;
@@ -147,7 +159,17 @@ export function setupRouteEditor(store, actions, setTool){
     check.disabled = !matching || running || !!preview?.pending;
     saveRow.hidden = !draft.confirmed;
     save.disabled = saving || !matching || !draft.confirmed || !name.value.trim();
-    run.disabled = saving || !!preview?.pending || dirty || !matching || !selected() || running || !actions.canMove();
+    const runningSelected = running && !!route && store.task.routeId === route.id;
+    let runMessage = actions.routeStartBlocker(route);
+    if (runningSelected) runMessage = '查看下方「导航任务」卡片了解进度。';
+    else if (starting) runMessage = '正在向后端提交任务。';
+    else if (saving) runMessage = '正在保存任务。';
+    else if (dirty && draft.points.length) runMessage = '请先确认并保存当前路线。';
+    else if (preview?.pending) runMessage = '正在检查路径，完成后可以启动。';
+    run.disabled = runningSelected || starting || !!runMessage;
+    const runText = runningSelected ? '导航任务执行中' : starting ? '正在启动…' : '启动导航任务';
+    if (run.textContent !== runText) run.textContent = runText;
+    if (runHint.textContent !== runMessage) runHint.textContent = runMessage;
     let message = '用「导航点」单击加点，拖拽可指定朝向。至少选两站。';
     if (draft.map && !matching) message = `路线属于地图 ${draft.map}，请先切图。`;
     else if (!draft.confirmed && draft.points.length >= 2) message = '选完后点击「确认路线」，最后一站将标为终点。';

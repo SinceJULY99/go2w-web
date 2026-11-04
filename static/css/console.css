@@ -360,6 +360,9 @@ input[type=range]{width:100%;accent-color:var(--accent);height:4px}
 .route-form .inrow{align-items:center}
 .route-form select{flex:1;min-width:0;height:28px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--fg)}
 .route-hint{font-size:11px;color:var(--muted)}
+.route-launch{margin-bottom:8px}
+.route-launch .btn{width:100%}
+.route-launch .route-hint:not(:empty){margin-top:4px}
 .route-points{list-style:none;margin:6px 0 0;padding:0;max-height:180px;overflow:auto}
 .route-points li{display:grid;grid-template-columns:minmax(0,1fr) repeat(3,auto);align-items:center;gap:4px;margin-top:6px}
 .route-points span{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

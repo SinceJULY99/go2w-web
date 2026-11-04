@@ -9,6 +9,18 @@ export function createActions(store, src){
   const run = id => store.profiles[id] === 'run';
   const curMode = () => Object.keys(MODES).find(m => store.profiles[m] !== 'stop') || null;
   const canMove = () => store.armed && !store.estop && run('navigation') && store.odomOk && store.link.ok;
+  function routeStartBlocker(route){
+    if (!route) return '请先保存或选择一个任务。';
+    if (!store.link.ok) return '等待连接后端。';
+    if (store.task.status === 'active' || store.profiles.patrol !== 'stop') return '请先结束当前导航或巡逻。';
+    if (store.estop) return '请先解除急停。';
+    if (store.busy) return '等待运行档位切换完成。';
+    if (!run('navigation')) return '请先在「运行档位」中启动导航。';
+    if (route.map !== store.mapCurrent) return `请先切换到路线地图 ${route.map}。`;
+    if (!store.odomOk || !store.robot.valid || store.fixed !== 'map') return '等待地图定位和里程计就绪。';
+    if (!store.armed) return '请先在「底盘控制」中解锁。';
+    return '';
+  }
   const blocked = cost => cost != null && cost >= 253;
   // 数据源还不支持这个操作时（比如真机上的暂停），给出说明并中止
   const ready = op => src.can(op) || (src.cmd.notice(op), false);
@@ -20,7 +32,7 @@ export function createActions(store, src){
   });
 
   const A = {
-    canMove, curMode,
+    canMove, curMode, routeStartBlocker,
     initialPose(p){
       if (!ready('initialPose')) return;
       if (!run('localization') && !run('navigation')) return toast('定位没有运行，无法设置初始位姿', 'err');
@@ -63,8 +75,8 @@ export function createActions(store, src){
         } });
     },
     startRoute(route){
-      if (!canMove()) return toast('请先启动导航、确认定位正常并解锁底盘', 'err');
-      if (!route || route.map !== store.mapCurrent) return toast('请选择当前地图的路线任务', 'err');
+      const reason = routeStartBlocker(route);
+      if (reason) return toast(reason, 'err');
       return exec(src.cmd.startRoute(route.id), '多点任务已启动');
     },
     patrolPoint(k, p){
