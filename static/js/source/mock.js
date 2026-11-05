@@ -371,6 +371,11 @@ export function createMockSource(store, bus){
     startPatrol(){ run('patrol') ? startPatrol() : cmd.toggle('patrol'); },
     teleop(k){ if (k && task.type!=='idle') cancelTask('Goal canceled: manual teleop'); S.keys = k; },
     saveMap(name){ store.maps.unshift({ name, meta:`${GW}×${GH} · 0.05 m` }); log('INFO','slam_toolbox',`Saved map to data/maps/${name}`); },
+    alignMap(source, name){
+      if (store.maps.some(map => map.name === name)) return { ok: false, msg: '目标地图已存在' };
+      store.maps.unshift({ name, meta:`${GW}×${GH} · 0.05 m` });
+      return { ok: true, msg: `模拟保存 ${name}，实际文件请在本地后端模式中验证` };
+    },
     loadMap(name){ store.mapCurrent = name; store.maps.forEach(m => m.cur = m.name===name); cancelTask('Goal canceled: map changed'); log('INFO','map_server',`Loading yaml file: data/maps/${name}.yaml`); },
     simulateDrop(){ if (!S.link) return; S.link = false; log('WARN','go2w_web','client heartbeat lost (> 1.0 s)');
       setTimeout(() => {

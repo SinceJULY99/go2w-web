@@ -265,6 +265,28 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
   }
   $('#mapList').onclick = e => { const b = e.target.closest('[data-m]'); if (b) actions.loadMap(store.maps[+b.dataset.m].name); };
   $('#saveMap').onclick = () => actions.saveMap($('#mapName').value.trim() || 'map');
+  $('#alignSelect').onclick = () => setTool('align');
+  $('#alignHorizontal').onclick = () => mapView.alignWall('horizontal');
+  $('#alignVertical').onclick = () => mapView.alignWall('vertical');
+  $('#alignReset').onclick = () => mapView.resetAlignment();
+  $('#saveAlignedMap').onclick = () => actions.saveAlignedMap($('#mapName').value.trim());
+  function renderAlignment(){
+    const a = store.alignment, busy = store.mapSaving || store.mapBusy;
+    const selected = a.points.length === 2;
+    const angle = (a.angle*180/Math.PI).toFixed(2);
+    $('#alignStatus').textContent = selected
+      ? `墙段 ${Math.hypot(a.points[1].x-a.points[0].x,a.points[1].y-a.points[0].y).toFixed(2)} m · 旋转 ${angle}° · ${a.target === 'vertical' ? '竖直' : '水平'}`
+      : a.points.length ? '已选第一点，再沿墙选择第二点。' : '选择至少 0.5 米的直墙，推荐 1 米以上。';
+    $('#alignPreview').hidden = !selected;
+    $('#alignPreview').textContent = `对齐预览 ${angle}° · 位姿读数沿用当前地图坐标`;
+    $('#alignSelect').disabled = busy || !store.map;
+    $('#alignHorizontal').disabled = $('#alignVertical').disabled = busy || !selected;
+    $('#alignReset').disabled = busy || !a.points.length;
+    $('#saveAlignedMap').disabled = busy || !selected || !run('mapping');
+    $('#saveAlignedMap').textContent = busy ? '保存中…' : '保存对齐地图';
+    $('#saveMap').disabled = busy;
+    $('#mapName').disabled = busy;
+  }
   // 录包的 topic 列表来自输入框；运行档位里的「录包」行也用它
   store.bagTopics = $('#bagTopics').value;
   $('#bagTopics').oninput = () => { store.bagTopics = $('#bagTopics').value; };
@@ -410,7 +432,7 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
 
   return {
     fast(){ renderTask(); renderRoutes(); renderHud(); renderArm(); syncSliders(); }, // 5 Hz
-    medium(){ renderChips(); renderCharts(); renderProfiles(); },  // 4 Hz
+    medium(){ renderChips(); renderCharts(); renderProfiles(); renderAlignment(); },  // 4 Hz
     slow(){ renderTopics(); renderMaps(); $('#clock').textContent = new Date().toTimeString().slice(0,8); }, // 1 Hz
     pushHist,                                                      // 10 Hz
     toggleLeft, toggleRight,

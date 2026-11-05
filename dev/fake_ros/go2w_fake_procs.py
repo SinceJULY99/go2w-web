@@ -3,6 +3,9 @@
 由 go2w_web.py 在 GO2W_FAKE_PROCS=1 时加载（web/dev/run.sh 会设置）。
 """
 import asyncio
+import os
+from pathlib import Path
+import sys
 
 
 class FakeProcs:
@@ -45,3 +48,12 @@ class FakeProcs:
     async def save_map(self, name):
         await asyncio.sleep(1.0)
         return self.sim.save_map(name)
+
+    async def align_map(self, source, target, angle):
+        script = Path(__file__).resolve().parents[3] / 'scripts/calib/align_map.py'
+        data = Path(os.environ['GO2W_DATA'])
+        with (data / 'logs/align_map.log').open('w') as log:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, str(script), str(data / 'maps'), source, target, str(angle),
+                stdout=log, stderr=log)
+            return await process.wait() == 0

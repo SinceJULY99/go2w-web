@@ -6,7 +6,7 @@ import { gridToCanvas, costToCanvas, CLOUD } from '../util.js';
 const T_MAP = 1, T_SCAN = 2, T_GCOST = 3, T_LCOST = 4, T_CLOUD = 5, T_PART = 6;
 // 已接入真机的操作；其余操作给出说明，不发任何指令
 const OPS = new Set(['initialPose', 'goal', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
-  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'checkRoute', 'deleteRoute', 'saveMap', 'loadMap', 'teleop']);
+  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'checkRoute', 'deleteRoute', 'saveMap', 'alignMap', 'loadMap', 'teleop']);
 const NOT_YET = {
   pause: '真机暂不支持暂停：可以取消任务，或者锁定底盘',
 };
@@ -109,6 +109,12 @@ export function createRosSource(store, bus){
         break;
       }
       case 'state': {
+        store.mapBusy = !!m.mapBusy;
+        if (store.mapCurrent && m.mapCurrent && store.mapCurrent !== m.mapCurrent){
+          store.patrol.A = store.patrol.B = store.goal = null;
+          store.routeDraft = { id: null, map: null, points: [], confirmed: false };
+          store.routeCheck = null;
+        }
         store.odomOk = m.odomOk; store.armed = m.armed; store.sys = m.sys; store.nodes = m.nodes; store.estop = !!m.estop;
         Object.assign(store.params, m.params || {});
         for (const [k, st] of Object.entries(m.profiles)){   // stop / starting / run / stopping
@@ -156,7 +162,7 @@ export function createRosSource(store, bus){
       const grid = await inflate(payload);
       mapGrid = { grid, ...meta };
       store.map = { img: gridToCanvas(grid, meta.w, meta.h), w: meta.w*meta.res, h: meta.h*meta.res,
-        ox: meta.ox, oy: meta.oy, res: meta.res, name: '/map', cells: `${meta.w}×${meta.h}` };
+        ox: meta.ox, oy: meta.oy, yaw: meta.oyaw || 0, res: meta.res, name: '/map', cells: `${meta.w}×${meta.h}` };
       // 光标读数和目标校验：有全局代价地图就用它（换算到 costmap_2d 的 0..254），否则用地图占用值粗略判断
       store.costAt = (x, y) => {
         if (gcost && Math.abs(gcost.oyaw || 0) < 1e-3){
@@ -166,7 +172,9 @@ export function createRosSource(store, bus){
             return v === 255 ? 254 : v >= 100 ? 254 : v >= 99 ? 253 : Math.round(v * 2.52);
           }
         }
-        const g = mapGrid, gx = Math.floor((x - g.ox)/g.res), gy = Math.floor((y - g.oy)/g.res);
+        const g = mapGrid, cosine = Math.cos(g.oyaw || 0), sine = Math.sin(g.oyaw || 0);
+        const dx = x-g.ox, dy = y-g.oy;
+        const gx = Math.floor((cosine*dx+sine*dy)/g.res), gy = Math.floor((-sine*dx+cosine*dy)/g.res);
         if (gx < 0 || gy < 0 || gx >= g.w || gy >= g.h) return 254;
         const v = g.grid[gy*g.w + gx]; return v === 255 ? 254 : v >= 65 ? 254 : 0;
       };
@@ -196,7 +204,8 @@ export function createRosSource(store, bus){
     startRoute: route_id => send('route_start', { route_id }),
     startPatrol: () => send('start_patrol', { loops: store.patrolLoops ?? 0 }),
     setPatrolPoint: (k, p) => send('patrol_point', { k, ...p }),
-    saveMap: name => send('save_map', { name }),
+    saveMap: name => send('save_map', { name }, 45000),
+    alignMap: (source, name, angle) => send('align_map', { source, name, angle }, 125000),
     loadMap: name => send('load_map', { name }),
     // 键盘遥控：按住时每 0.1 s 发一次（后端 0.3 s 收不到就发零速）；松手立即发零
     teleop: k => {

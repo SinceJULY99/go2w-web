@@ -111,6 +111,7 @@ export function createActions(store, src){
     releaseEstop(){ exec(src.cmd.releaseEstop(), '急停已解除，底盘仍处于锁定', 'warn'); },
     setParam(k, v){ if (ready('setParam')) return exec(src.cmd.setParam(k, v), null); },
     setMode(m){
+      if (store.mapSaving || store.mapBusy) return toast('地图正在保存，请稍等', 'warn');
       if (!ready('setMode')) return;
       if (store.busy) return toast('上一个启停还没完成，稍等几秒', 'warn');
       const cur = curMode();
@@ -140,12 +141,37 @@ export function createActions(store, src){
       if (id === 'patrol' && !run('patrol')) return A.startPatrol();
       exec(src.cmd.toggle(id), null);
     },
-    saveMap(name){
+    async saveMap(name){
       if (!ready('saveMap')) return;
+      if (store.mapSaving || store.mapBusy) return toast('地图正在保存，请稍等', 'warn');
       if (!run('mapping')) return toast('保存地图需要「建图」正在运行', 'err');
-      exec(src.cmd.saveMap(name), `地图已保存：${name}`).then(r => { if (!r || r.ok !== false) store.mapSavedAt = Date.now(); });
+      store.mapSaving = true;
+      try {
+        const result = await exec(src.cmd.saveMap(name), `地图已保存：${name}`);
+        if (!result || result.ok !== false) store.mapSavedAt = Date.now();
+        return result;
+      } finally { store.mapSaving = false; }
+    },
+    async saveAlignedMap(name){
+      if (!ready('alignMap') || store.mapSaving || store.mapBusy) return;
+      if (!run('mapping')) return toast('保存对齐地图需要「建图」正在运行', 'err');
+      if (!/^[A-Za-z0-9_-]{1,40}$/.test(name)) return toast('原图名限 1–40 个字母、数字、下划线或减号', 'err');
+      const alignment = store.alignment;
+      if (alignment.points.length !== 2 || !alignment.target) return toast('先沿墙选两点并选择对齐方向', 'err');
+      const angle = alignment.angle;
+      store.mapSaving = true;
+      try {
+        if (alignment.source !== name){
+          const result = await exec(src.cmd.saveMap(name), null);
+          if (result && result.ok === false) return result;
+          alignment.source = name;
+          store.mapSavedAt = Date.now();
+        }
+        return await exec(src.cmd.alignMap(name, name + '_aligned', angle), null);
+      } finally { store.mapSaving = false; }
     },
     loadMap(name){
+      if (store.mapSaving || store.mapBusy) return toast('地图正在保存，请稍等', 'warn');
       if (!ready('loadMap')) return;
       const live = run('localization') || run('navigation');
       if (src.name === 'ros' && !live) return exec(src.cmd.loadMap(name), null);   // 没在跑：只是选好下次启动用的地图

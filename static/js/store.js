@@ -24,6 +24,9 @@ export function createStore(){
     routes: [],
     routeDraft: { id: null, map: null, points: [], confirmed: false },
     routeCheck: null,
+    alignment: { points: [], angle: 0, target: null, source: null },
+    mapSaving: false,
+    mapBusy: false,
     patrol: { A: null, B: null, loops: 5 },
     // task.phase: plan | align | follow | final | dwell | arrived
     task: { type: 'idle' },

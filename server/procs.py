@@ -112,6 +112,12 @@ class DockerProcs:
         assert SAFE_NAME.match(name)
         return await self.run(f'bash /go2w/scripts/save_map.sh {name} > {LOGS}/save_map.log 2>&1', 40.0) == 0  # 脚本自己加载 ROS 环境
 
+    async def align_map(self, source, target, angle):
+        assert SAFE_NAME.fullmatch(source) and SAFE_NAME.fullmatch(target)
+        return await self.run(
+            f'python3 /go2w/scripts/calib/align_map.py /go2w/data/maps '
+            f'{source} {target} {angle!r} > {LOGS}/align_map.log 2>&1', 120.0) == 0
+
 
 # ---------- 直接读数据目录（web 容器和导航容器挂的是同一个仓库） ----------
 def tail(path, n=12):

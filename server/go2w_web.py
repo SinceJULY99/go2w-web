@@ -893,6 +893,7 @@ class Server:
         self.starting = {}            # 档位 → 开始启动的时间（启动超时 / 失败检测）
         self.busy = False             # 同一时间只做一个启停操作
         self.map_choice = None        # 没有定位 / 导航在跑时，网页选好的「下次启动用的地图」
+        self.map_busy = False         # 保存和导出地图期间保护源快照及目标文件
         self.teleop = None            # (vx, vy, wz, 收到时间)；None = 没有在遥控
         self.maps = P.list_maps(os.path.join(DATA, 'maps'))
         self.bags = P.list_bags(os.path.join(DATA, 'bags'))
@@ -983,6 +984,8 @@ class Server:
 
     async def handle_cmd(self, ws, d):
         n, op = self.node, d.get('op')
+        if self.map_busy and op in ('set_mode', 'load_map', 'save_map', 'align_map'):
+            return False, '地图正在保存或对齐，请稍等'
         if ws.closed or ws not in self.clients:
             return False, '网页已断开'
         if self.checking_route and op in ('goal', 'initial_pose', 'start_patrol', 'route_start'):
@@ -1117,6 +1120,8 @@ class Server:
                 return True, '录包已停止'
             if op == 'save_map':
                 return await self.save_map(d.get('name', ''))
+            if op == 'align_map':
+                return await self.align_map(d.get('source'), d.get('name'), d.get('angle'))
             if op == 'load_map':
                 return await self.load_map(d.get('name', ''))
             return False, f'不支持的操作：{op}'
@@ -1403,7 +1408,7 @@ class Server:
 
     def set_mode(self, mode, map_name=None):
         n = self.node
-        if self.busy:
+        if self.busy or self.map_busy:
             return False, '上一个启停还没完成，稍等几秒'
         if mode is not None and mode not in P.MODES:
             return False, f'没有这个档位：{mode}'
@@ -1522,18 +1527,45 @@ class Server:
         return True, f'开始录包：data/bags/{name}'
 
     async def save_map(self, name):
+        if self.busy or self.map_loading:
+            return False, '档位或地图正在切换，请稍等'
         if self.prof('mapping') != 'run':
             return False, '保存地图需要「建图」正在运行'
         if not P.SAFE_NAME.match(name):
             return False, '地图名只能用字母、数字、下划线和减号'
+        self.maps = P.list_maps(os.path.join(DATA, 'maps'))
         if any(m['name'] == name for m in self.maps):
             return False, f'已经有同名地图 {name}，换个名字（不会覆盖）'
         self.node.event('INFO', f'保存地图 {name}……')
-        if await self.procs.save_map(name):
+        self.map_busy = True
+        try:
+            if await self.procs.save_map(name):
+                self.maps = P.list_maps(os.path.join(DATA, 'maps'))
+                self.node.event('INFO', f'地图已保存：data/maps/{name}')
+                return True, f'地图已保存：{name}'
+            return False, '保存失败：' + (P.tail(os.path.join(DATA, 'logs', 'save_map.log'), 6) or '看 data/logs/save_map.log')
+        finally:
+            self.map_busy = False
+
+    async def align_map(self, source, name, angle):
+        if self.busy or self.map_loading:
+            return False, '档位或地图正在切换，请稍等'
+        if not all(isinstance(v, str) and P.SAFE_NAME.fullmatch(v) for v in (source, name)):
+            return False, '源地图和目标地图名只能用字母、数字、下划线和减号（最多 48 字符）'
+        if isinstance(angle, bool) or not isinstance(angle, (int, float)) or not math.isfinite(angle) or abs(angle) > math.pi / 2:
+            return False, '对齐角度必须在 -90° 到 90° 之间'
+        self.maps = P.list_maps(os.path.join(DATA, 'maps'))
+        if source not in [m['name'] for m in self.maps]:
+            return False, '找不到已保存的原始地图'
+        self.map_busy = True
+        try:
+            if not await self.procs.align_map(source, name, float(angle)):
+                return False, '对齐导出失败，原图已保留：' + P.tail(os.path.join(DATA, 'logs/align_map.log'), 5)
             self.maps = P.list_maps(os.path.join(DATA, 'maps'))
-            self.node.event('INFO', f'地图已保存：data/maps/{name}')
-            return True, f'地图已保存：{name}'
-        return False, '保存失败：' + (P.tail(os.path.join(DATA, 'logs', 'save_map.log'), 6) or '看 data/logs/save_map.log')
+            self.node.event('INFO', f'对齐地图已保存：{name}，原图 {source} 用于续建')
+            return True, f'已保存 {name}（PGM / YAML / PNG），原图 {source} 保留用于续建'
+        finally:
+            self.map_busy = False
 
     async def load_map(self, name):
         n = self.node
@@ -1541,6 +1573,7 @@ class Server:
             return False, f'data/maps 里没有 {name}'
         if not n.loadmap_cli.service_is_ready():
             self.map_choice = name
+            n.patrol['A'] = n.patrol['B'] = None
             return True, f'下次启动定位 / 导航时用 {name}'
         if self.map_loading:
             return False, '正在切换地图'
@@ -1553,6 +1586,7 @@ class Server:
             if r.result != 0:
                 return False, f'map_server 加载失败（错误码 {r.result}）'
             n.map_current = name
+            n.patrol['A'] = n.patrol['B'] = None
         finally:
             self.map_loading = False
         n.event('WARN', f'已切换到地图 {name}：请重新设置初始位姿')
@@ -1771,7 +1805,7 @@ class Server:
                     await self.send_all(json.dumps({'t': 'logs', 'items': items}))
                 if k % 10 == 0:  # 状态 2 Hz
                     st = n.state(self.sys.read(), self.procs_status, self.transitions)
-                    st.update(estop=self.estop, busy=self.busy, maps=self.maps, bags=self.bags, mapChoice=self.map_choice,
+                    st.update(estop=self.estop, busy=self.busy, mapBusy=self.map_busy, maps=self.maps, bags=self.bags, mapChoice=self.map_choice,
                               procsKnown=self.procs_status is not None, teleop=self.teleop is not None)
                     await self.send_all(json.dumps(st))
                 # topic 查看器：只发给正在看这个 topic 的网页

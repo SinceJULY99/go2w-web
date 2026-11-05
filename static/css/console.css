@@ -245,6 +245,9 @@ body.has-photo .robot-ico{width:104px;height:78px;background:var(--panel)}
 .mrow .mn{font-family:var(--f-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mrow .mm{font-family:var(--f-mono);font-size:11px;color:var(--muted)}
 .inrow{display:flex;gap:6px;margin-bottom:6px}
+.alignment-controls{display:grid;gap:7px;padding:9px 0;border-bottom:1px solid var(--line);margin-bottom:7px}
+.alignment-buttons{display:flex;gap:5px;flex-wrap:wrap}
+.alignment-preview{position:absolute;z-index:3;top:56px;right:72px;max-width:calc(100% - 88px);padding:7px 12px;border:1px solid #ffe08a66;border-radius:8px;background:rgba(12,18,28,.92);color:#ffe08a;font-size:12px;pointer-events:none}
 .inrow input{flex:1;min-width:0;height:28px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--fg);padding:0 9px;font:12px var(--f-mono)}
 
 /* ---------- right rail ---------- */

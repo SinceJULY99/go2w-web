@@ -83,6 +83,7 @@
           <span class="k">frame</span><span class="v" id="hFrame">--</span>
         </div>
         <div class="aim-hint" id="aimHint" hidden></div>
+        <div class="alignment-preview" id="alignPreview" hidden></div>
         <div class="hud hud-tr">
           <button class="ib" id="vFollow" title="跟随机器人 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
           <button class="ib" id="vFit" title="适配地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
@@ -100,6 +101,7 @@
           <button class="tool" data-tool="goal" title="导航目标：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 21V4h10l-2 4 2 4H6"/></svg><span>导航目标</span><kbd>3</kbd></button>
           <button class="tool" data-tool="route" title="连续点击添加导航点"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 17l5-10 7 8"/><circle cx="6" cy="17" r="2"/><circle cx="11" cy="7" r="2"/><circle cx="18" cy="15" r="2"/></svg><span>导航点</span><kbd>7</kbd></button>
           <button class="tool" data-tool="measure" title="测距"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg><span>测距</span><kbd>6</kbd></button>
+          <button class="tool" data-tool="align" title="沿墙选两点，对齐地图方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4v16h16M7 14l12-5M7 17h12"/></svg><span>地图对齐</span></button>
           <div class="tsep"></div>
           <button class="tool" data-tool="teleop" title="键盘遥控"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10.5v4M5 12.5h4"/><circle cx="16" cy="11.5" r="1"/><circle cx="18" cy="13.5" r="1"/></svg><span>遥控</span><kbd>T</kbd></button>
         </div>
@@ -155,6 +157,12 @@
               <div>
                 <h4>地图 <span class="mono" style="color:var(--muted);font-size:11px">data/maps</span></h4>
                 <div class="inrow"><input id="mapName" value="lab_20261030"><button class="btn sm" id="saveMap">保存当前地图</button></div>
+                <div class="alignment-controls">
+                  <div class="alignment-buttons"><button class="btn sm" id="alignSelect">沿墙选两点</button><button class="btn sm" id="alignHorizontal">对齐水平</button><button class="btn sm" id="alignVertical">对齐竖直</button><button class="btn sm ghost" id="alignReset">取消预览</button></div>
+                  <div id="alignStatus" class="meta">选择至少 0.5 米的直墙，推荐 1 米以上。</div>
+                  <button class="btn sm pri" id="saveAlignedMap" disabled>保存对齐地图</button>
+                  <span class="meta">原图用于续建，对齐副本用于导航。</span>
+                </div>
                 <div id="mapList"></div>
               </div>
               <div>
