@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # 在 Mac 上本地调试网页控制台，不连机器人。
 #
-#   web/dev/run.sh [地图.yaml]
+#   dev/run.sh [地图.yaml]
 #
-# 跑的是真实的后端代码（web/server/go2w_web.py），ROS 和导航容器换成 web/dev/fake_ros 里的假模拟器：
+# 跑的是真实的后端代码（server/go2w_web.py），ROS 和导航容器换成 dev/fake_ros 里的假模拟器：
 # 加载真实地图，模拟各运行档位、Nav2、cmd_bridge、patrol.py，scan 按地图射线计算。
 #   http://127.0.0.1:8080        ROS 模式（走真实的后端和 WebSocket 协议）
 #   http://127.0.0.1:8080/?mock  纯前端模拟（不经过后端数据）
 #
-# 存图、录包写进数据副本 ~/.cache/go2w_web_data（第一次运行从仓库 data/maps 复制），不碰仓库里的 data/。
+# 存图、录包写进数据副本 ~/.cache/go2w_web_data（第一次运行从 GO2W_MAPS_SRC，默认 ../data/maps 复制），不碰仓库里的 data/。
 # 想从头再来：rm -rf ~/.cache/go2w_web_data
 #
-# 环境变量：PORT（默认 8080）、GO2W_FAKE_STAMP_RATE（/odom 时间戳走速倍数，默认 1.0）
+# 环境变量：GO2W_MAPS_SRC（地图来源目录），PORT（默认 8080）、GO2W_FAKE_STAMP_RATE（/odom 时间戳走速倍数，默认 1.0）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,7 +26,12 @@ DATA=${GO2W_DATA:-$HOME/.cache/go2w_web_data}
 if [ ! -d "$DATA/maps" ]; then
   echo "准备数据副本：$DATA"
   mkdir -p "$DATA/maps" "$DATA/bags" "$DATA/logs"
-  cp ../data/maps/*.yaml ../data/maps/*.pgm "$DATA/maps/"
+  SRC=${GO2W_MAPS_SRC:-../data/maps}
+  if ! ls "$SRC"/*.yaml >/dev/null 2>&1; then
+    rmdir "$DATA/maps" "$DATA/bags" "$DATA/logs" 2>/dev/null || true
+    echo "找不到地图：$SRC。单独 clone 时用 GO2W_MAPS_SRC=主仓库/data/maps 指定" >&2; exit 1
+  fi
+  cp "$SRC"/*.yaml "$SRC"/*.pgm "$DATA/maps/"
 fi
 
 PORT=${PORT:-8080}

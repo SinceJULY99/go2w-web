@@ -1,4 +1,4 @@
-// P3 协议回归测试：先运行 web/dev/run.sh，再在 Mac 上运行 node web/dev/test_p3.mjs [ws://127.0.0.1:8080/ws]
+// P3 协议回归测试：先运行 dev/run.sh，再在 Mac 上运行 node dev/test_p3.mjs [ws://127.0.0.1:8080/ws]
 // 会切换档位、巡逻、录包、存图、遥控，只能对本地假 ROS 运行，不要指向真机
 // 测试点是按默认地图 data/maps/lab_20261021 选的空旷处
 const URL_ = process.argv[2] || 'ws://127.0.0.1:8080/ws';

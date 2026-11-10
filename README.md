@@ -3,15 +3,26 @@
 替代 RViz 和 `nav.sh` 的网页界面。三栏布局：左边图层和 topic，中间地图，右边任务、运行档位、定位质量和底盘控制。
 
 ```
-web/
-  server/go2w_web.py   后端：rclpy 节点（域 43）+ aiohttp，HTTP 和 WebSocket 同一端口
-  static/              前端：原生 JS 模块，不需要构建
-    js/source/mock.js  模拟数据源（示例地图 + 机器人仿真）
-    js/source/ros.js   ROS 数据源（连后端 /ws）
-  prototype/           最早的单文件原型，留作对照
+server/go2w_web.py   后端：rclpy 节点（域 43）+ aiohttp，HTTP 和 WebSocket 同一端口
+server/procs.py      运行档位的进程管理（经 docker.sock 在 go2w_humble 容器里执行）
+server/camera.py     前置摄像头 RTP 组播接收、拼帧
+static/              前端：原生 JS 模块，不需要构建
+  js/source/mock.js  模拟数据源（示例地图 + 机器人仿真）
+  js/source/ros.js   ROS 数据源（连后端 /ws）
+dev/                 本地调试：假 ROS、假摄像头、协议测试
+prototype/           最早的单文件原型和右栏原型，留作对照
 ```
 
 界面只读 `js/store.js` 里的状态，两个数据源负责填它；操作统一经过 `js/actions.js` 做前置检查和确认。
+
+## 和 go2w 主仓库的关系
+
+这个仓库是从 [go2w](https://github.com/SinceJULY99/go2w) 的 `web/` 目录拆出来的（11-10，保留了历史）。代码本身单独维护，但运行时仍依赖主仓库：
+
+- 扩展坞上它放在 `~/go2w/web`，容器里是 `/go2w/web`。`go2w_web` 容器的镜像和 compose 在主仓库 `docker/`。
+- 后端调用主仓库的脚本：`scripts/save_map.sh`、`scripts/rollback_recorder.py`、`scripts/calib/align_map.py`、`docker/ros_env.sh`，launch 文件在 `ws/src/go2w_bringup`。
+- 数据目录默认是上一级的 `data/`（`~/go2w/data`），可以用 `GO2W_DATA` 改。地图、路线、录包都在那里，不进这个仓库。
+- 同步到扩展坞和 166 仍用主仓库的 `scripts/sync.sh`，它同步的是主仓库里的 `web/`。在这里改完，要先把改动放进主仓库的 `web/` 再同步。
 
 ## 进度
 
@@ -36,7 +47,7 @@ web/
 
 网页上的 A/B 往返巡逻和地图工具栏的「导航目标」已移除（11-06），用多站任务代替：两个点加「循环」就是往返巡逻。命令行（`nav.sh`）启动的 `patrol.py` 后端仍会识别：取消、急停、切换档位时会连它一起停，它运行时网页拒绝启动多站任务。多点任务执行时，其他网页不能另发单点、巡逻或键盘遥控指令。取消、急停、上锁、控制方心跳丢失、切换地图或运行档位都会结束整条任务。连接恢复后不会自动继续。路线存在后端的 `data/routes.json`，和地图一样可单独备份。纯前端 `?mock` 的路线存于当前浏览器，没有 Nav2 规划检查。假 ROS 后端会把规划结果明确标为「本地模拟」。真实规划预览只代表检查时的地图与代价地图，执行中仍由 Nav2 根据最新障碍物重规划。
 
-本地可用 `web/dev/run.sh` 启动假机器人，再运行 `node web/dev/test_routes.mjs` 验证多点协议和停止行为。真机验收时要检查实际到点、朝向和停车。
+本地可用 `dev/run.sh` 启动假机器人，再运行 `node dev/test_routes.mjs` 验证多点协议和停止行为。真机验收时要检查实际到点、朝向和停车。
 
 ## 右栏任务流程（11-06）
 
@@ -57,7 +68,7 @@ web/
 - 拖高底部面板可以看大一点，面板高度会被记住。
 - 后端的接收地址和网口可以用环境变量 `GO2W_CAM_ADDR`（默认 `230.1.1.1:1720`）和 `GO2W_CAM_IF`（默认 `GO2W_WIRED_IF`）修改。
 
-本地调试：`web/dev/run.sh` 会启动 `dev/fake_camera.py`，循环回放真机录的 10 s 样本 `dev/camera_sample.rtp`。测试：`web/dev/test_camera.py`（拆帧，装了 ffprobe 会独立解码核对），`web/dev/test_camera_ws.py`（协议，要先运行 run.sh）。
+本地调试：`dev/run.sh` 会启动 `dev/fake_camera.py`，循环回放真机录的 10 s 样本 `dev/camera_sample.rtp`。测试：`dev/test_camera.py`（拆帧，装了 ffprobe 会独立解码核对），`dev/test_camera_ws.py`（协议，要先运行 run.sh）。
 
 ## 地图显示方向
 
@@ -72,7 +83,7 @@ web/
 
 **导出对齐地图（一般不需要）：** 建图运行时，输入新地图名并点击「保存对齐地图」。后端先保存原图及 SLAM 数据，再按当前显示方向把图片转正，生成 `<名字>_aligned.pgm/.yaml/.png`，都位于扩展坞的 `~/go2w/data/maps`。图片最多转 ±90°，剩下的 180° 记成新地图的显示方向。对齐副本的坐标和原图不同：用它导航要重新设置初始位姿、重新选路线站点。原图保留用于续建。导出失败时原图保留，可以重试；已有文件不会被覆盖。只在需要地图文件本身是正的时候才用（比如给 RViz 或别的工具）。
 
-`web/dev/test_map_alignment.py` 验证图片旋转、原点和未知区域；本地假 ROS 页面也会运行相同的导出程序，可在未连接机器狗时检查保存结果。
+`dev/test_map_alignment.py` 验证图片旋转、原点和未知区域；本地假 ROS 页面也会运行相同的导出程序，可在未连接机器狗时检查保存结果。
 
 ### P2 图层的数据来源
 
@@ -129,12 +140,12 @@ P3（`docker exec` 走的是真实 Docker API，本地只用假 socket 测过）
 
 ### P3 的注意事项
 
-- `go2w_web` 挂了 `docker.sock`，等于后端能控制扩展坞上的 docker。后端只执行 `web/server/procs.py` 里固定的命令，地图名、包名、topic 名都经过校验。
+- `go2w_web` 挂了 `docker.sock`，等于后端能控制扩展坞上的 docker。后端只执行 `server/procs.py` 里固定的命令，地图名、包名、topic 名都经过校验。
 - 网页没有登录：同一网络里能打开页面的人都能启停导航、解锁底盘。只在可信网络里用。
 - 多站任务和遥控都受心跳保护：关掉发起操作的网页会停车。长时间执行任务时要保持网页开着。
 - 遥控直接发布 `/cmd_vel`，开始前会取消导航并拒绝同时发目标；没有加速度指令复用器，RViz 此时再发目标会和遥控抢指令。
 
-测试：`node web/dev/test_protocol.mjs`（P1）、`node web/dev/test_p3.mjs`（P3）、`node web/dev/test_map_views.mjs`（地图显示方向）都要先运行 `web/dev/run.sh`；`web/dev/test_procs.py` 用假 Docker socket 真实执行进程管理脚本。
+测试：`node dev/test_protocol.mjs`（P1）、`node dev/test_p3.mjs`（P3）、`node dev/test_map_views.mjs`（地图显示方向）都要先运行 `dev/run.sh`；`dev/test_procs.py` 用假 Docker socket 真实执行进程管理脚本。
 
 每一项都手持遥控器做，先在空旷处、低速（滑条调到 0.3 m/s）试。
 
@@ -143,25 +154,27 @@ P3（`docker exec` 走的是真实 Docker API，本地只用假 socket 测过）
 在 Mac 上运行（第一次会在 `~/.cache/go2w_web_venv` 装 aiohttp、numpy）：
 
 ```bash
-~/Desktop/go2w/web/dev/run.sh
+dev/run.sh
 ```
 
-- http://127.0.0.1:8080 ：ROS 模式。跑的是真实的后端代码和 WebSocket 协议，ROS 换成 `web/dev/fake_ros` 里的假机器人：加载 `data/maps/lab_20261021.yaml`，在空旷处随机巡游，scan 按地图射线计算。
+第一次运行要一份地图：默认从 `../data/maps` 复制（在主仓库的 `web/` 里运行时就是主仓库的 `data/maps`）。单独 clone 这个仓库时，用 `GO2W_MAPS_SRC=~/Desktop/go2w/data/maps dev/run.sh` 指定。
+
+- http://127.0.0.1:8080 ：ROS 模式。跑的是真实的后端代码和 WebSocket 协议，ROS 换成 `dev/fake_ros` 里的假机器人：加载 `data/maps/lab_20261021.yaml`，在空旷处随机巡游，scan 按地图射线计算。
 - http://127.0.0.1:8080/?mock ：纯前端模拟，有完整的任务、路径、档位切换，用来调界面。
 
-改了前端刷新就生效；改了后端要 Ctrl+C 后重新运行。可选环境变量：`PORT`、`GO2W_FAKE_SPEED`（巡游速度）、`GO2W_FAKE_STAMP_RATE`（模拟 /odom 时间戳走速偏差，比如 1.5，用来测速度诊断）。也可以换地图：`web/dev/run.sh 路径/地图.yaml`。
+改了前端刷新就生效；改了后端要 Ctrl+C 后重新运行。可选环境变量：`PORT`、`GO2W_FAKE_SPEED`（巡游速度）、`GO2W_FAKE_STAMP_RATE`（模拟 /odom 时间戳走速偏差，比如 1.5，用来测速度诊断）。也可以换地图：`dev/run.sh 路径/地图.yaml`。
 
-`web/dev/fake_ros` 只给本地用，容器里不会加载它。
+`dev/fake_ros` 只给本地用，容器里不会加载它。
 
 ## 回溯录制
 
-录包区的「回溯录制」打开时（默认打开），建图 / 定位 / 导航运行期间，`scripts/rollback_recorder.py` 把最近 20 秒的数据留在内存里循环覆盖，不写硬盘；点「保存刚才 20 秒」存成 `data/bags/snap_<时间>`，和普通录包一样可以上传、删除。topic 是默认录包列表加 `/livox/lidar /livox/imu`（`procs.py` 的 `ROLLBACK_TOPICS`）。它是独立进程、独立节点，可以和 `ros2 bag record` 同时运行。`/map`、`/tf_static`、`/robot_description` 这种只发一次的 topic 会一直保留，放在包的开头。日志在 `data/logs/rollback.log`，开关状态在 `data/rollback.json`。
+录包区的「回溯录制」打开时（默认打开），建图 / 定位 / 导航运行期间，主仓库的 `scripts/rollback_recorder.py` 把最近 20 秒的数据留在内存里循环覆盖，不写硬盘；点「保存刚才 20 秒」存成 `data/bags/snap_<时间>`，和普通录包一样可以上传、删除。topic 是默认录包列表加 `/livox/lidar /livox/imu`（`procs.py` 的 `ROLLBACK_TOPICS`）。它是独立进程、独立节点，可以和 `ros2 bag record` 同时运行。`/map`、`/tf_static`、`/robot_description` 这种只发一次的 topic 会一直保留，放在包的开头。日志在 `data/logs/rollback.log`，开关状态在 `data/rollback.json`。
 
 ## 部署到扩展坞
 
 第一次部署需要重建镜像，因为加了 `python3-aiohttp`；之后只改网页代码的话，同步后刷新浏览器就行，后端代码改了要重启 `go2w_web` 容器。改了 compose（比如 P3 加的 `docker.sock`）要重建这个容器：`docker compose up -d --no-deps web`。
 
-1. 同步代码 · 在 Mac 上运行：
+1. 同步代码 · 在 Mac 上运行（主仓库的脚本，同步主仓库里的 `web/`）：
 
    ```bash
    ~/Desktop/go2w/scripts/sync.sh dock
@@ -181,8 +194,8 @@ P3（`docker exec` 走的是真实 Docker API，本地只用假 socket 测过）
 
 大家平时打开 **http://192.168.1.166**。166 上的 nginx 提供前端页面，并把 `/ws` 转发到扩展坞的 `192.168.1.142:8080`。后端、心跳上锁和进程管理仍在扩展坞上，166 只做转发。机器人关机时页面仍能打开，但只显示「机器人未连接」，开机后自动重连。直接打开 `http://192.168.1.142:8080` 也照常能用。
 
-- 第一次安装（已完成 11-05）· 在 166 上运行：`sudo bash ~/go2w-web-setup/install.sh evoengine`（文件来自 `scripts/server/`）。安装 nginx 并设为开机自启，放行局域网访问 80 端口，禁止系统休眠。
-- 改了前端 · 在 Mac 上运行：`scripts/sync.sh server`。前端在扩展坞上也有一份，要保持一致。
+- 第一次安装（已完成 11-05）· 在 166 上运行：`sudo bash ~/go2w-web-setup/install.sh evoengine`（文件来自主仓库 `scripts/server/`）。安装 nginx 并设为开机自启，放行局域网访问 80 端口，禁止系统休眠。
+- 改了前端 · 在 Mac 上运行主仓库的 `scripts/sync.sh server`。前端在扩展坞上也有一份，要保持一致。
 - 后端只信任来自 166 的 `X-Forwarded-For`，日志显示为「真实 IP 经 192.168.1.166」。代理地址可以用环境变量 `GO2W_TRUSTED_PROXIES` 修改，多个地址用逗号分隔。
 
 看后端日志 · 在扩展坞上运行：

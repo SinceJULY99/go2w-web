@@ -3,7 +3,7 @@
 
 本地模拟器用 FakeProcs，绕过了这些脚本；这里验证 API 调用格式、pgrep 位掩码、pkill 流程和超时。
 pgrep / pkill 的目标是本测试自己起的假进程，脚本里写 /go2w 的命令不测。
-运行：python web/dev/test_procs.py（需要 aiohttp）
+运行：python dev/test_procs.py（需要 aiohttp）
 """
 import asyncio, os, subprocess, sys, tempfile, uuid
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'server'))

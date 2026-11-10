@@ -1,4 +1,4 @@
-// 只能对 web/dev/run.sh 的假 ROS 服务运行。
+// 只能对 dev/run.sh 的假 ROS 服务运行。
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 

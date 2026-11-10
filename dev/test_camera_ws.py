@@ -1,5 +1,5 @@
-"""摄像头协议测试：先运行 web/dev/run.sh（带假摄像头），再运行
-    ~/.cache/go2w_web_venv/bin/python web/dev/test_camera_ws.py [ws://127.0.0.1:8080/ws]
+"""摄像头协议测试：先运行 dev/run.sh（带假摄像头），再运行
+    ~/.cache/go2w_web_venv/bin/python dev/test_camera_ws.py [ws://127.0.0.1:8080/ws]
 """
 import asyncio
 import json

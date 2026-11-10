@@ -1,4 +1,4 @@
-// P1 协议回归测试：先运行 web/dev/run.sh，再在 Mac 上运行 node web/dev/test_protocol.mjs [ws://127.0.0.1:8080/ws]
+// P1 协议回归测试：先运行 dev/run.sh，再在 Mac 上运行 node dev/test_protocol.mjs [ws://127.0.0.1:8080/ws]
 // 会解锁、导航、急停、断心跳，只能对本地假 ROS 运行，不要指向真机
 // 测试目标点是按默认地图 data/maps/lab_20261021 选的空旷处（离墙和未知区域 0.6 m 以上），换地图会失败
 const URL_ = process.argv[2] || 'ws://127.0.0.1:8080/ws';

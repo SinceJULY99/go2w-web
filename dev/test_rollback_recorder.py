@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""回溯录制的缓存和存包逻辑（不需要 ROS）。python3 web/dev/test_rollback_recorder.py"""
+"""回溯录制的缓存和存包逻辑（不需要 ROS）。python3 dev/test_rollback_recorder.py"""
 import os
 import sys
 import tempfile

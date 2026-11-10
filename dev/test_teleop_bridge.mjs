@@ -1,4 +1,4 @@
-// 不开导航也能遥控：先运行 web/dev/run.sh，再 node web/dev/test_teleop_bridge.mjs [ws://127.0.0.1:8080/ws]
+// 不开导航也能遥控：先运行 dev/run.sh，再 node dev/test_teleop_bridge.mjs [ws://127.0.0.1:8080/ws]
 // 只能对本地假 ROS 运行
 const URL_ = process.argv[2] || 'ws://127.0.0.1:8080/ws';
 const sleep = ms => new Promise(r => setTimeout(r, ms));

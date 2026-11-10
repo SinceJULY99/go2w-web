@@ -1,6 +1,6 @@
 """摄像头拆帧测试：用真实录下的组播样本（dev/camera_sample.rtp，11-06 在扩展坞上录的 10 s）检查 RTP → H.264。
 
-    python3 web/dev/test_camera.py
+    python3 dev/test_camera.py
 
 样本格式：每个包前面是 <dH（录制时刻 s、包长），后面是原始 RTP。
 装了 ffprobe 的话，还会用它独立解码拼出来的 H.264，确认分辨率和帧数。
