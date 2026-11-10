@@ -9,11 +9,26 @@ export function createMapView(store, actions){
   let W = 0, H = 0, DPR = 1, t = 0;
   const view = { cx: 12, cy: 8, s: 40, follow: false };
   let touched = false; // 用户动过视角后，窗口尺寸变化不再自动适配
-  let alignmentContext = null;
   const alignment = () => store.alignment;
+  // 地图显示方向：每张地图一个角度，存在后端（store.mapViews）。建图时还没有地图名，用 MAPPING_VIEW 暂存
+  const MAPPING_VIEW = '_mapping', SNAP = 3 * Math.PI / 180, QUARTER = Math.PI / 2;
+  let viewKey = null, savedAngle = null;
+  const currentKey = () => store.mapCurrent || (actions.curMode() === 'mapping' ? MAPPING_VIEW : null);
+  const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+  const flash = () => { alignment().flashUntil = performance.now() + 2500; };
+  function setAngle(a, save = false){
+    alignment().angle = wrapPi(a); flash(); syncCompass();
+    const key = currentKey();
+    if (save && key) actions.setMapView(key, alignment().angle);
+  }
+  function syncCompass(){
+    const deg = alignment().angle * 180 / Math.PI;
+    $('#vRotNeedle').style.transform = `rotate(${-alignment().angle}rad)`;
+    $('#vRot').title = `地图显示方向 ${deg.toFixed(1)}° · 单击顺时针转 90°，双击复位 · Shift 或右键拖动地图可自由旋转（按住 Alt 不吸附）`;
+  }
   // aim：点了一下位置、还在等第二下确定朝向（点两下 = 按住拖动的替代，触控板更好用）
   const V = { tool: 'pan', measure: [], drag: null, aim: null };
-  const POSE_TOOLS = { init: '初始位姿', goal: '导航目标', A: '巡逻点 A', B: '巡逻点 B' };
+  const POSE_TOOLS = { init: '初始位姿' };
   const hint = $('#aimHint');
   function showHint(){
     if (V.tool === 'align'){
@@ -51,19 +66,38 @@ export function createMapView(store, actions){
     const p = rotatePoint({x:x-m.ox,y:y-m.oy}, -(m.yaw || 0));
     return p.x>=0 && p.y>=0 && p.x<m.w && p.y<m.h;
   };
-  function resetAlignment(){
-    store.alignment = {points:[],angle:0,target:null,source:null};
-    V.drag = V.aim = null;
+  // 清掉「沿墙选两点」的选点（换地图时这些点就没意义了）
+  function clearWall(){
+    Object.assign(alignment(), { points:[], target:null, source:null });
     if (V.tool === 'align') setTool('pan');
-    fit();
+  }
+  // 「复位方向」：回到 0°，并存到后端
+  function resetAlignment(){
+    clearWall(); V.drag = V.aim = null;
+    setAngle(0, true); fit();
   }
   function alignWall(target){
     if (store.mapSaving || store.mapBusy) return;
     const points = alignment().points;
     if (points.length !== 2) return toast('请先沿一段墙选择两个点', 'warn');
-    alignment().angle = wallAngle(points, target);
     alignment().target = target;
+    setAngle(wallAngle(points, target), true);
     touched = true; fit();
+  }
+  // 地图名变了：换成那张图存的方向；别的网页改了方向：跟着变（自己正在拖的时候不打断）
+  function syncView(){
+    const key = currentKey();
+    const saved = key ? (store.mapViews[key] ?? 0) : null;
+    if (key !== viewKey){
+      viewKey = key; savedAngle = saved;
+      if (key === null) return;           // 暂时不知道是哪张图（连接断开、档位切换中）：保持当前方向
+      clearWall();
+      alignment().angle = saved; syncCompass();
+      fit();
+    } else if (key !== null && saved !== savedAngle){
+      savedAngle = saved;
+      if (V.drag?.tool !== 'rot'){ alignment().angle = saved; flash(); syncCompass(); }
+    }
   }
   // 栅格图像：原点 (ox, oy) 在左下角，可以带 yaw（真机的局部代价地图在 odom 下，转到 map 后是斜的）
   function drawGridImg(m, img){
@@ -97,6 +131,20 @@ export function createMapView(store, actions){
     ctx.fillStyle = ACC; ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill();
     ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x+Math.cos(-g.th)*22, y+Math.sin(-g.th)*22); ctx.stroke(); ctx.restore();
   }
+  // 重定位：修正后的位置（青色虚线车身 + 车头圆点，拖车身平移、拖圆点旋转）
+  const knobLen = () => Math.max(0.8, 34 / view.s);
+  function drawRelocGhost(){
+    const P = store.reloc.pose(); if (!P) return;
+    const changed = store.reloc.changed(), x = sx(P.x), y = sy(P.y), L = .7*view.s, Wd = .42*view.s;
+    const kx = sx(P.x + Math.cos(P.th)*knobLen()), ky = sy(P.y + Math.sin(P.th)*knobLen());
+    ctx.save(); ctx.strokeStyle = '#38e1dc'; ctx.fillStyle = 'rgba(56,225,220,.12)'; ctx.lineWidth = 2;
+    ctx.setLineDash(changed ? [5,4] : []);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(-P.th); ctx.beginPath(); ctx.roundRect(-L/2, -Wd/2, L, Wd, 4); ctx.fill(); ctx.stroke(); ctx.restore();
+    ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(kx, ky); ctx.stroke();
+    ctx.fillStyle = '#38e1dc'; ctx.beginPath(); ctx.arc(kx, ky, 6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#04070c'; ctx.beginPath(); ctx.arc(kx, ky, 2.5, 0, 7); ctx.fill();
+    ctx.restore();
+  }
   function drawRobot(){
     const R = store.robot, s = view.s, x = sx(R.x), y = sy(R.y);
     if (on('rings')){ ctx.save(); ctx.strokeStyle = 'rgba(220,235,250,.22)'; ctx.lineWidth = 1; ctx.setLineDash([3,5]);
@@ -126,11 +174,7 @@ export function createMapView(store, actions){
 
   function draw(dt){
     t += dt;
-    const context = [store.link.ok, actions.curMode(), store.fixed, store.mapChoice, store.mapCurrent || store.map?.name].join('|');
-    if (alignmentContext !== context && !store.mapSaving){
-      if (alignmentContext !== null) resetAlignment();
-      alignmentContext = context;
-    }
+    if (!store.mapSaving) syncView();
     const R = store.robot, m = store.map, s = view.s;
     if (view.follow && R.valid){ view.cx += (R.x - view.cx)*Math.min(1, dt*4); view.cy += (R.y - view.cy)*Math.min(1, dt*4); }
     ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0,W,H);
@@ -169,7 +213,13 @@ export function createMapView(store, actions){
     if (on('trail') && tr.length > 1){ ctx.strokeStyle = 'rgba(138,160,184,.35)'; ctx.lineWidth = 1.5; ctx.beginPath(); tr.forEach((p,i) => i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1]))); ctx.stroke(); }
     if (on('cloud')){ const z = Math.max(1.6, .05*s); ctx.globalAlpha = .85;
       store.cloud.forEach((arr, ci) => { ctx.fillStyle = CLOUD[ci]; for (let i=0;i<arr.length;i+=2) ctx.fillRect(sx(arr[i])-z/2, sy(arr[i+1])-z/2, z, z); }); ctx.globalAlpha = 1; }
-    if (on('scan')){ const sc = store.scan; ctx.fillStyle = '#fff'; for (let i=0;i<sc.length;i+=2) ctx.fillRect(sx(sc[i])-1.2, sy(sc[i+1])-1.2, 2.4, 2.4); }
+    const rv = store.reloc?.on ? store.reloc.view() : null;
+    if (rv){
+      // 重定位：激光按修正后的位姿画，贴墙绿、悬空红（不管激光图层开没开）
+      const { pts, ok } = rv;
+      for (const [want, col] of [[1, '#35d48a'], [0, '#ff4b5c']]){ ctx.fillStyle = col;
+        for (let i=0, k=0; i<pts.length; i+=2, k++) if (ok[k] === want) ctx.fillRect(sx(pts[i])-1.6, sy(pts[i+1])-1.6, 3.2, 3.2); }
+    } else if (on('scan')){ const sc = store.scan; ctx.fillStyle = '#fff'; for (let i=0;i<sc.length;i+=2) ctx.fillRect(sx(sc[i])-1.2, sy(sc[i+1])-1.2, 2.4, 2.4); }
     const P = store.plan;
     if (P && on('plan')){
       const pts = P.pts, k = Math.min(store.planIdx, pts.length-1);
@@ -182,8 +232,6 @@ export function createMapView(store, actions){
     if (on('local') && store.localPlan){ ctx.save(); ctx.strokeStyle = TRAJ; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.shadowColor = TRAJ; ctx.shadowBlur = 8; polyline(store.localPlan); ctx.stroke(); ctx.restore(); }
     if (on('particles')){ const pa = store.particles; ctx.strokeStyle = 'rgba(255,224,138,.7)'; ctx.lineWidth = 1; ctx.beginPath();
       for (let i=0;i<pa.length;i+=3){ const x = sx(pa[i]), y = sy(pa[i+1]), a = pa[i+2]; ctx.moveTo(x,y); ctx.lineTo(x+Math.cos(-a)*7, y+Math.sin(-a)*7); } ctx.stroke(); }
-    if (store.patrol.A) drawPin(store.patrol.A, 'A', '#f2f6fb');
-    if (store.patrol.B) drawPin(store.patrol.B, 'B', '#f2f6fb');
     const draft = store.routeDraft;
     if (draft.map && draft.map === store.mapCurrent && draft.points.length){
       const check = store.routeCheck;
@@ -203,6 +251,7 @@ export function createMapView(store, actions){
     }
     if (store.goal) drawGoal(store.goal);
     if (R.valid) drawRobot();
+    if (store.reloc?.on) drawRelocGhost();
     if (on('tf')) drawTF();
     const wall = alignment().points;
     if (wall.length){
@@ -223,7 +272,7 @@ export function createMapView(store, actions){
       ctx.restore(); }
     const d = V.drag && V.drag.moved && (V.drag.tool === 'route' || POSE_TOOLS[V.drag.tool]) ? V.drag : V.aim;
     if (d){
-      const col = d.tool==='init' ? '#6fb6ff' : d.tool==='goal' ? ACC : d.tool==='route' ? '#ffe08a' : '#f2f6fb';
+      const col = d.tool==='init' ? '#6fb6ff' : '#ffe08a';
       const X0 = sx(d.x0), Y0 = sy(d.y0), dx = sx(d.x1)-X0, dy = sy(d.y1)-Y0, len = Math.hypot(dx, dy);
       // 箭头至少 30 px 长；鼠标还没离开起点时先朝右画
       const X1 = len < 1 ? X0+30 : X0 + dx*Math.max(1, 30/len), Y1 = len < 1 ? Y0 : Y0 + dy*Math.max(1, 30/len);
@@ -237,12 +286,14 @@ export function createMapView(store, actions){
   }
 
   /* ---------- 工具与指针 ---------- */
-  const TOOLS = ['pan','init','goal','A','B','measure','route'];
+  // 数字键 1–5 按工具栏从左到右的顺序
+  const TOOLS = ['pan','init','route','measure','align'];
   function setTool(tool, onTeleop){
     if ((store.mapSaving || store.mapBusy) && tool === 'align') return;
     if (tool === 'align'){
       if (!store.map) return toast('地图尚未加载', 'warn');
-      resetAlignment();
+      // 重新选墙：只清掉上次选的两个点，不动这张地图已保存的显示方向
+      Object.assign(alignment(), { points:[], target:null, source:null });
     }
     if (tool==='teleop' && V.tool!=='teleop' && onTeleop && !onTeleop()) return;
     V.tool = tool; $$('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool===tool));
@@ -257,14 +308,26 @@ export function createMapView(store, actions){
     if (!inMap(x, y)) return toast('位置在地图范围之外', 'err');
     const p = { x, y, th };
     if (tool==='init') actions.initialPose(p);
-    else if (tool==='goal') actions.goal(p);
-    else actions.patrolPoint(tool, p);
   }
   const local = e => { const r = cv.getBoundingClientRect(); return [e.clientX-r.left, e.clientY-r.top]; };
   const stopFollow = () => { touched = true; view.follow = false; $('#vFollow').classList.remove('on'); };
+  // 旋转：绕画面中心转，指针绕中心转多少地图就转多少
+  const pointerAngle = (px, py) => Math.atan2(-(py - H/2), px - W/2);
+  cv.addEventListener('contextmenu', e => e.preventDefault());   // 右键拖动用来旋转
   cv.addEventListener('pointerdown', e => {
+    if (e.button === 2 || (e.button === 0 && e.shiftKey)){
+      const [px, py] = local(e); cv.setPointerCapture(e.pointerId);
+      V.drag = { tool:'rot', prev: pointerAngle(px, py), turned: 0, ang0: alignment().angle, start: alignment().angle };
+      cv.style.cursor = 'grabbing'; return;
+    }
     if (e.button !== 0 && e.button !== 1) return;
     const [px, py] = local(e); cv.setPointerCapture(e.pointerId);
+    const RP = e.button === 0 && V.tool === 'pan' && store.reloc?.on ? store.reloc.pose() : null;
+    if (RP){
+      const {x,y} = world(px,py), kl = knobLen();
+      if (Math.hypot(x - (RP.x + Math.cos(RP.th)*kl), y - (RP.y + Math.sin(RP.th)*kl)) < 14/view.s){ V.drag = { tool:'relocRot' }; cv.style.cursor = 'grabbing'; return; }
+      if (Math.hypot(x - RP.x, y - RP.y) < Math.max(.45, 16/view.s)){ V.drag = { tool:'relocMove', dx: RP.x - x, dy: RP.y - y }; cv.style.cursor = 'grabbing'; return; }
+    }
     if (V.tool==='pan' || V.tool==='teleop' || e.button===1){ V.drag = { tool:'pan', px, py, cx:view.cx, cy:view.cy }; cv.style.cursor = 'grabbing'; stopFollow(); return; }
     const {x,y} = world(px,py);
     if (V.tool === 'align'){
@@ -289,6 +352,20 @@ export function createMapView(store, actions){
     $('#cursor').innerHTML = inMap(x, y) ? `x <b>${x.toFixed(2)}</b>  y <b>${y.toFixed(2)}</b>  cost <b>${c}</b>` : 'x <b>--</b>  y <b>--</b>  cost <b>--</b>';
     if (V.aim){ V.aim.x1 = x; V.aim.y1 = y; }
     const d = V.drag; if (!d) return;
+    if (d.tool === 'relocMove' || d.tool === 'relocRot'){
+      const D = store.reloc.begin(); if (!D) return;
+      if (d.tool === 'relocMove'){ D.x = x + d.dx; D.y = y + d.dy; } else D.th = Math.atan2(y - D.y, x - D.x);
+      store.reloc.render(); return;
+    }
+    if (d.tool === 'rot'){
+      const cur = pointerAngle(px, py);
+      if (Math.hypot(px - W/2, py - H/2) < 24){ d.prev = cur; return; }   // 太靠近中心，角度不稳，先不算
+      d.turned += wrapPi(cur - d.prev); d.prev = cur;
+      let a = d.ang0 + d.turned;
+      const q = Math.round(a / QUARTER) * QUARTER;
+      if (!e.altKey && Math.abs(a - q) < SNAP) a = q;   // 靠近 0° / 90° / 180° / 270° 时吸附
+      setAngle(a); return;
+    }
     if (d.tool==='pan'){
       const delta = rotatePoint({x:(px-d.px)/view.s,y:-(py-d.py)/view.s}, -alignment().angle);
       view.cx = d.cx-delta.x; view.cy = d.cy-delta.y; return;
@@ -297,6 +374,12 @@ export function createMapView(store, actions){
   });
   cv.addEventListener('pointerup', () => {
     const d = V.drag; if (!d) return; V.drag = null;
+    if (d.tool === 'relocMove' || d.tool === 'relocRot'){ cv.style.cursor = 'grab'; return; }
+    if (d.tool === 'rot'){
+      cv.style.cursor = V.tool==='pan' ? 'grab' : 'default';
+      if (Math.abs(wrapPi(alignment().angle - d.start)) > 1e-4) setAngle(alignment().angle, true);
+      return;
+    }
     if (d.tool==='pan'){ cv.style.cursor = V.tool==='pan' ? 'grab' : 'default'; return; }
     if (d.tool === 'route'){
       if (!inMap(d.x0, d.y0)) return toast('位置在地图范围之外', 'err');
@@ -314,12 +397,21 @@ export function createMapView(store, actions){
 
   $('#vFollow').onclick = () => { touched = true; view.follow = !view.follow; $('#vFollow').classList.toggle('on', view.follow); if (view.follow && view.s < 50) view.s = 60; };
   $('#vFit').onclick = () => { stopFollow(); touched = false; fit(); };
+  // 指南针：单击顺时针转 90°，双击复位（单击要等一下，看是不是双击）
+  let rotClick = null;
+  $('#vRot').onclick = () => {
+    if (rotClick){ clearTimeout(rotClick); rotClick = null; return; }
+    rotClick = setTimeout(() => { rotClick = null; setAngle(alignment().angle - QUARTER, true); }, 240);
+  };
+  $('#vRot').ondblclick = () => { clearTimeout(rotClick); rotClick = null; resetAlignment(); };
   $('#vIn').onclick = () => { touched = true; view.s = clamp(view.s*1.3, 8, 400); };
   $('#vOut').onclick = () => { touched = true; view.s = clamp(view.s/1.3, 8, 400); };
 
   $('#hudToggle').onclick = () => $('#hudTl').classList.toggle('mini');
 
-  resize(); fit();
+  resize(); fit(); syncCompass();
   new ResizeObserver(() => { resize(); if (!touched) fit(); }).observe(stage);
-  return { draw, fit, resize, setTool, resetAlignment, alignWall, TOOLS, view, get tool(){ return V.tool; } };
+  // 屏幕方向（像素，y 向下）→ 地图里的单位向量：地图可能转了显示角度
+  const screenDir = (dx, dy) => rotatePoint({ x: dx, y: -dy }, -alignment().angle);
+  return { draw, fit, resize, setTool, resetAlignment, alignWall, screenDir, TOOLS, view, get tool(){ return V.tool; } };
 }

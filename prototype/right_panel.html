@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>右栏任务流程原型</title>
+<!-- 右栏「导航 / 重定位 / 建图」任务流程的可点原型：纯前端模拟，不连机器人，不改正式页面。
+     直接用浏览器打开本文件即可（样式复用 ../static/css/console.css）。 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="../static/css/console.css">
+<style>
+.proto-tag{font-size:11px;padding:3px 9px;border-radius:999px;color:var(--warn);border:1px solid rgba(243,177,63,.45);background:rgba(30,20,4,.6);white-space:nowrap}
+.top .grow{flex:1}
+.stage{flex:1;min-height:0}
+.center{grid-template-rows:minmax(0,1fr)}
+.right{width:360px}
+
+/* 任务切换 */
+.tasks{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.tasks button{height:44px;border-radius:8px;border:1px solid var(--line-2);background:var(--panel);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:13px;font-weight:700;color:var(--fg-2)}
+.tasks button small{font-size:10px;font-weight:400;color:var(--muted)}
+.tasks button:hover{border-color:var(--fg-2)}
+.tasks button.on{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent-line)}
+.tasks button.on small{color:var(--accent)}
+.robot-line{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:11.5px;color:var(--muted)}
+.robot-line b{color:var(--fg-2);font-weight:500}
+.robot-line .sp{flex:1}
+
+/* 步骤 */
+.flow{display:flex;flex-direction:column;gap:6px}
+.step{border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow:hidden}
+.step-h{display:grid;grid-template-columns:22px 1fr auto;gap:9px;align-items:center;padding:9px 11px;min-height:42px}
+.step-n{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font:11px var(--f-mono);border:1px solid var(--line-2);color:var(--muted)}
+.step-t{font-size:12.5px;font-weight:700;color:var(--fg-2)}
+.step-s{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:2px;font-family:var(--f-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.step-b{padding:0 11px 11px 42px}
+.step[data-s="done"] .step-n{color:var(--ok);border-color:rgba(53,212,138,.45)}
+.step[data-s="done"] .step-n::after{content:"✓"}
+.step[data-s="done"] .step-n span{display:none}
+.step[data-s="cur"]{border-color:var(--accent-line);background:linear-gradient(180deg,rgba(56,225,220,.05),var(--panel))}
+.step[data-s="cur"] .step-n{color:var(--accent);border-color:var(--accent)}
+.step[data-s="cur"] .step-t{color:var(--fg)}
+.step[data-s="todo"]{opacity:.55}
+.step[data-s="todo"] .step-b{display:none}
+.step[data-s="done"]:not(.open) .step-b{display:none}
+.step-b .hint{font-size:11px;color:var(--muted);line-height:1.6;margin:0 0 8px}
+.step-b select,.step-b input[type=text],.step-b input[type=number]{height:28px;border-radius:6px;border:1px solid var(--line);background:var(--raise);color:var(--fg);padding:0 8px;font:12px var(--f-mono)}
+.step-b select{width:100%}
+.row{display:flex;gap:6px;align-items:center}
+.row>.grow{flex:1;min-width:0}
+.btn.full{width:100%}
+.btn.big{height:40px;font-size:13px}
+.big-btn-note{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:11.5px}
+.kv span{color:var(--muted)}
+.kv b{font-family:var(--f-mono);font-weight:500;color:var(--fg)}
+.stations{list-style:none;margin:8px 0 0;padding:0;font-size:11.5px;color:var(--fg-2);counter-reset:s}
+.stations li{counter-increment:s;display:flex;gap:6px;padding:2px 0}
+.stations li::before{content:counter(s);width:16px;height:16px;border-radius:50%;display:grid;place-items:center;font:9px var(--f-mono);background:rgba(255,224,138,.15);color:#ffe08a;flex:none}
+.note{font-size:11px;color:var(--muted);line-height:1.6;padding:8px 10px;border-radius:7px;background:var(--panel);border:1px dashed var(--line-2)}
+.note b{color:var(--fg-2);font-weight:500}
+.note.warn{border-color:rgba(243,177,63,.45);color:var(--warn)}
+
+/* 重定位 */
+.match{display:flex;align-items:baseline;gap:8px}
+.match b{font:600 30px var(--f-mono)}
+.match small{color:var(--muted);font-size:11px}
+.match-bar{height:6px;border-radius:999px;background:var(--panel);border:1px solid var(--line);overflow:hidden;margin:6px 0 8px}
+.match-bar i{display:block;height:100%;border-radius:999px;transition:width .2s}
+.legend{display:flex;gap:12px;font-size:11px;color:var(--fg-2);margin-top:4px}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.pad{display:grid;grid-template-columns:repeat(3,40px);grid-template-rows:repeat(3,34px);gap:4px;justify-content:center;margin:6px 0}
+.pad button{border-radius:7px;border:1px solid var(--line-2);background:var(--raise);font-size:14px;color:var(--fg)}
+.pad button:hover{border-color:var(--accent)}
+.pad .c{font-size:10px;color:var(--muted)}
+.seg2{display:inline-flex;border:1px solid var(--line-2);border-radius:7px;overflow:hidden}
+.seg2 button{height:24px;padding:0 9px;border:0;background:none;font-size:11px;color:var(--fg-2)}
+.seg2 button.on{background:var(--accent-soft);color:var(--accent)}
+.delta{font:11px var(--f-mono);color:var(--muted);text-align:center;margin-top:2px}
+
+/* 执行中 */
+.run-card{border:1px solid var(--accent-line);border-radius:9px;padding:11px;background:linear-gradient(180deg,rgba(56,225,220,.06),var(--panel))}
+.run-card h4{margin:0 0 2px;font-size:13px}
+.run-card .sub{font-size:11.5px;color:var(--fg-2)}
+
+.base-card .row{justify-content:space-between}
+.lock{display:flex;align-items:center;gap:8px;font-size:12px}
+.lock i{width:9px;height:9px;border-radius:50%;background:var(--muted)}
+.lock[data-s="on"] i{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.lock[data-s="off"] i{background:var(--warn)}
+
+.modal .kv{margin:0 0 14px;padding:10px 12px;border-radius:8px;background:var(--panel);border:1px solid var(--line)}
+.modal label.chk{display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--fg);margin:0 0 14px;line-height:1.5;cursor:pointer}
+.modal label.chk input{margin-top:3px;accent-color:var(--accent)}
+.modal select{width:100%;height:30px;margin:0 0 12px;border-radius:6px;border:1px solid var(--line-2);background:var(--raise);color:var(--fg);padding:0 8px;font:12px var(--f-mono)}
+.modal .warnline{color:var(--warn);font-size:12px;margin:-6px 0 14px;line-height:1.6}
+
+.busy-mask{position:absolute;inset:0;z-index:5;display:grid;place-items:center;background:rgba(3,6,10,.55);font-size:13px;color:var(--fg-2)}
+.busy-mask b{display:block;font-size:15px;color:var(--fg);margin-bottom:4px}
+.map-tip{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:4;padding:6px 12px;border-radius:8px;background:rgba(6,11,18,.9);border:1px solid var(--accent-line);font-size:12px;color:var(--fg-2);pointer-events:none;white-space:nowrap}
+.map-tip b{color:var(--accent);font-weight:500}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top panel">
+    <div class="brand">
+      <div>
+        <div class="brand-name">GO2W<span>导航控制台</span></div>
+        <div class="brand-sub">右栏任务流程 · <b data-s="mock">原型</b></div>
+      </div>
+    </div>
+    <span class="proto-tag">原型 · 纯前端模拟，不连机器人 · 虚线机器人＝真实位置（只在原型里显示）</span>
+    <div class="grow"></div>
+    <button class="btn ghost sm" id="reset">重置原型</button>
+    <button class="estop" id="estopBtn"><span class="estop-ring"></span>急停<kbd>Space</kbd></button>
+  </header>
+
+  <div class="main">
+    <main class="center">
+      <section class="stage" id="stage">
+        <canvas id="map"></canvas>
+        <div class="map-tip" id="mapTip" hidden></div>
+        <div class="busy-mask" id="busy" hidden><div><b id="busyT"></b><span id="busyS"></span></div></div>
+      </section>
+    </main>
+
+    <aside class="col right">
+      <section class="panel card">
+        <div class="card-h"><h3>任务</h3><span class="pill" id="modePill">--</span></div>
+        <div class="tasks" id="tasks">
+          <button data-t="nav">导航<small>多站任务</small></button>
+          <button data-t="reloc">重定位<small>手动修正位姿</small></button>
+          <button data-t="map">建图<small>slam_toolbox</small></button>
+        </div>
+        <div class="robot-line"><span>导航栈</span><b id="stackTxt">--</b><span class="sp"></span><span>底盘</span><b id="armTxt">--</b></div>
+      </section>
+
+      <section class="panel card" id="body"></section>
+
+      <section class="panel card base-card">
+        <div class="card-h"><h3>底盘</h3><span class="meta">go2w_cmd_bridge</span></div>
+        <div class="row"><div class="lock" id="lock"><i></i><span id="lockTxt">--</span></div><button class="btn sm ghost" id="lockBtn">上锁</button></div>
+        <div class="big-btn-note">导航启动时自动解锁，切换任务、取消、急停时自动上锁。这里只留一个手动上锁。</div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
+const deg = r => r * 180 / Math.PI;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+
+/* ---------- 假地图：墙是线段，单位米 ---------- */
+const MAPS = {
+  lab_20261030: { w: 24, h: 15, walls: [
+    [0,0,24,0],[24,0,24,15],[24,15,0,15],[0,15,0,0],
+    [8,0,8,6],[8,8.5,8,15],[16,0,16,5],[16,7.5,16,15],[16,10,24,10],[0,9,5,9],
+    [11,4,13,4],[11,4,11,5.5],[19,3,21,3],[3,12,4.5,12],
+  ]},
+  corridor_20261028: { w: 30, h: 8, walls: [
+    [0,0,30,0],[30,0,30,8],[30,8,0,8],[0,8,0,0],
+    [0,3,9,3],[11.5,3,30,3],[0,5,20,5],[22.5,5,30,5],[9,3,9,0],[20,5,20,8],
+  ]},
+};
+const ROUTES = [
+  { id: 'r1', map: 'lab_20261030', name: '实验室巡检', pts: [[3,3,0],[12,6.5,0],[20,6.2,0],[20,12.5,1.57],[11,12,3.14]] },
+  { id: 'r2', map: 'lab_20261030', name: '工位往返', pts: [[3,3,0],[12,6.5,0],[19.5,12.5,0]] },
+  { id: 'r3', map: 'lab_20261030', name: '充电位', pts: [[3,3,0],[5,6.5,1.57]] },
+  { id: 'r4', map: 'corridor_20261028', name: '走廊全程', pts: [[2,4,0],[15,4,0],[28,4,0],[28,6.5,1.57]] },
+];
+const HOME = { x: 3, y: 3, th: 0 };   // 原型里机器人真实停在这里
+
+/* ---------- 状态 ---------- */
+let S;
+function fresh(){
+  return {
+    tab: null,                 // 右栏显示的任务（就是机器人当前的档位）
+    stack: 'none',             // none | nav | loc | map ：在跑的进程
+    busy: null,                // 启停中的文案
+    armed: false, estop: false,
+    map: 'lab_20261030',
+    truth: { ...HOME },        // 真实位姿（只在原型里画）
+    est: null,                 // AMCL 估计
+    routeId: null, round: false, loops: 1, vx: 0.45, wz: 1.2,
+    run: null,                 // 执行中的任务
+    openStep: null,            // 已完成步骤里被展开的
+    tool: null,                // init | null
+    reloc: { orig: null, step: 1 },
+    mapping: { t0: 0, saved: null, name: '', bag: false },
+    driftNote: false,
+  };
+}
+S = fresh();
+
+/* ---------- 激光：从真实位姿射线求交，再按估计位姿画到地图上 ---------- */
+function rayHit(x, y, a, walls){
+  const dx = Math.cos(a), dy = Math.sin(a); let best = 12;
+  for (const [x1,y1,x2,y2] of walls){
+    const ex = x2-x1, ey = y2-y1, den = dx*ey - dy*ex; if (Math.abs(den) < 1e-9) continue;
+    const t = ((x1-x)*ey - (y1-y)*ex) / den, u = ((x1-x)*dy - (y1-y)*dx) / den;
+    if (t > 0.05 && u >= 0 && u <= 1 && t < best) best = t;
+  }
+  return best < 12 ? best : null;
+}
+function segDist(px, py, [x1,y1,x2,y2]){
+  const ex = x2-x1, ey = y2-y1, L = ex*ex+ey*ey, t = L ? clamp(((px-x1)*ex+(py-y1)*ey)/L, 0, 1) : 0;
+  return Math.hypot(px-(x1+t*ex), py-(y1+t*ey));
+}
+let scanCache = null;
+function scan(){
+  if (!S.est || S.stack === 'none' || S.stack === 'map') return null;
+  const walls = MAPS[S.map].walls, T = S.truth, E = S.est, pts = []; let hit = 0;
+  for (let i = 0; i < 240; i++){
+    const a = i / 240 * Math.PI * 2, r = rayHit(T.x, T.y, T.th + a, walls); if (r == null) continue;
+    const x = E.x + r*Math.cos(E.th + a), y = E.y + r*Math.sin(E.th + a);
+    const ok = walls.some(w => segDist(x, y, w) < 0.12); if (ok) hit++;
+    pts.push([x, y, ok]);
+  }
+  return { pts, match: pts.length ? 100 * hit / pts.length : 0 };
+}
+const err = () => S.est ? { d: Math.hypot(S.est.x - S.truth.x, S.est.y - S.truth.y), a: Math.abs(deg(wrap(S.est.th - S.truth.th))) } : null;
+
+/* ---------- 地图绘制 ---------- */
+const cv = $('#map'), ctx = cv.getContext('2d');
+let W = 0, H = 0, sc = 1, ox = 0, oy = 0;
+function resize(){
+  const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1;
+  W = r.width; H = r.height; cv.width = W*d; cv.height = H*d; ctx.setTransform(d,0,0,d,0,0);
+}
+const fit = () => { const m = MAPS[S.map]; sc = Math.min((W-80)/m.w, (H-80)/m.h); ox = (W - m.w*sc)/2; oy = (H + m.h*sc)/2; };
+const sx = x => ox + x*sc, sy = y => oy - y*sc;
+const wx = px => (px-ox)/sc, wy = py => (oy-py)/sc;
+function robot(p, col, dashed){
+  ctx.save(); ctx.translate(sx(p.x), sy(p.y)); ctx.rotate(-p.th);
+  const L = .7*sc, Wd = .42*sc;
+  ctx.setLineDash(dashed ? [4,3] : []); ctx.lineWidth = 2; ctx.strokeStyle = col; ctx.fillStyle = dashed ? 'transparent' : col + '33';
+  ctx.beginPath(); ctx.roundRect(-L/2, -Wd/2, L, Wd, 4); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(L/2+2, 0); ctx.lineTo(L/2+12, 0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(L/2+14, 0); ctx.lineTo(L/2+8, -4); ctx.lineTo(L/2+8, 4); ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+  ctx.restore();
+}
+let drag = null;
+function draw(){
+  fit(); ctx.clearRect(0,0,W,H);
+  const m = MAPS[S.map], mapping = S.stack === 'map';
+  // 网格
+  ctx.strokeStyle = 'rgba(56,225,220,.05)'; ctx.lineWidth = 1;
+  for (let x = 0; x <= m.w; x++){ ctx.beginPath(); ctx.moveTo(sx(x), sy(0)); ctx.lineTo(sx(x), sy(m.h)); ctx.stroke(); }
+  for (let y = 0; y <= m.h; y++){ ctx.beginPath(); ctx.moveTo(sx(0), sy(y)); ctx.lineTo(sx(m.w), sy(y)); ctx.stroke(); }
+  ctx.fillStyle = mapping ? 'rgba(157,176,199,.04)' : 'rgba(157,176,199,.08)'; ctx.fillRect(sx(0), sy(m.h), m.w*sc, m.h*sc);
+  ctx.strokeStyle = mapping ? 'rgba(219,230,243,.45)' : '#dbe6f3'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+  for (const [x1,y1,x2,y2] of m.walls){ ctx.beginPath(); ctx.moveTo(sx(x1), sy(y1)); ctx.lineTo(sx(x2), sy(y2)); ctx.stroke(); }
+  // 路线
+  const r = ROUTES.find(r => r.id === S.routeId);
+  if (r && r.map === S.map && S.tab === 'nav'){
+    ctx.strokeStyle = 'rgba(255,224,138,.55)'; ctx.setLineDash([6,5]); ctx.lineWidth = 2; ctx.beginPath();
+    r.pts.forEach(([x,y], i) => i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)));
+    if (S.round) ctx.lineTo(sx(r.pts[0][0]), sy(r.pts[0][1]));
+    ctx.stroke(); ctx.setLineDash([]);
+    r.pts.forEach(([x,y], i) => { ctx.fillStyle = '#ffe08a'; ctx.beginPath(); ctx.arc(sx(x), sy(y), 10, 0, 7); ctx.fill();
+      ctx.fillStyle = '#1a1405'; ctx.font = '600 11px "JetBrains Mono"'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(i+1, sx(x), sy(y)+.5); });
+  }
+  // 激光
+  const sc_ = scanCache = scan();
+  if (sc_){ for (const [x,y,ok] of sc_.pts){ ctx.fillStyle = ok ? '#35d48a' : '#ff4b5c'; ctx.beginPath(); ctx.arc(sx(x), sy(y), 2.2, 0, 7); ctx.fill(); } }
+  // 真实位置（原型专用）+ 估计位置
+  robot(S.truth, '#9db0c7', true);
+  if (S.est && S.stack !== 'map') robot(S.est, '#38e1dc', false);
+  if (drag && drag.kind === 'init'){
+    const a = Math.atan2(drag.y1-drag.y0, drag.x1-drag.x0);
+    robot({ x: drag.x0, y: drag.y0, th: Math.hypot(drag.x1-drag.x0, drag.y1-drag.y0) > .05 ? a : 0 }, '#6fb6ff', false);
+  }
+  // 地图名
+  ctx.fillStyle = 'rgba(157,176,199,.7)'; ctx.font = '11px "JetBrains Mono"'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(mapping ? '建图中 · 地图会随着走动长出来（原型里直接显示完整地图）' : S.map, sx(0), sy(m.h) - 8);
+}
+
+/* ---------- 地图交互：初始位置拖动、重定位拖动 ---------- */
+const local = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+cv.addEventListener('pointerdown', e => {
+  const [px, py] = local(e), x = wx(px), y = wy(py);
+  if (S.tool === 'init'){ cv.setPointerCapture(e.pointerId); drag = { kind: 'init', x0: x, y0: y, x1: x, y1: y }; draw(); return; }
+  if (S.tab === 'reloc' && S.est && Math.hypot(x - S.est.x, y - S.est.y) < 1.0){
+    cv.setPointerCapture(e.pointerId); drag = { kind: 'move', dx: S.est.x - x, dy: S.est.y - y, rot: e.shiftKey, a0: Math.atan2(y - S.est.y, x - S.est.x), th0: S.est.th };
+  }
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag) return; const [px, py] = local(e), x = wx(px), y = wy(py);
+  if (drag.kind === 'init'){ drag.x1 = x; drag.y1 = y; }
+  else if (drag.rot) S.est.th = wrap(drag.th0 + Math.atan2(y - S.est.y, x - S.est.x) - drag.a0);
+  else { S.est.x = x + drag.dx; S.est.y = y + drag.dy; }
+  draw(); if (drag.kind === 'move') renderSoft();
+});
+cv.addEventListener('pointerup', () => {
+  if (!drag) return;
+  if (drag.kind === 'init'){
+    const a = Math.hypot(drag.x1-drag.x0, drag.y1-drag.y0) > .05 ? Math.atan2(drag.y1-drag.y0, drag.x1-drag.x0) : 0;
+    S.est = { x: drag.x0, y: drag.y0, th: a }; S.tool = null; S.openStep = null;
+    toast('初始位置已发给 AMCL');
+  }
+  drag = null; render();
+});
+
+/* ---------- 弹窗 ---------- */
+function modal({ title, html, ok = '确认', danger = false, onOk, need }){
+  const s = document.createElement('div'); s.className = 'scrim';
+  s.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${esc(title)}</h3>${html}<div class="btn-row"><button class="btn ghost" data-a="c">取消</button><button class="btn ${danger ? 'danger' : 'pri'}" data-a="o">${esc(ok)}</button></div></div>`;
+  const okBtn = s.querySelector('[data-a=o]');
+  const sync = () => { if (need) okBtn.disabled = !need(s); };
+  s.addEventListener('change', sync); sync();
+  const close = () => { s.remove(); document.removeEventListener('keydown', k); };
+  const k = e => { if (e.key === 'Escape') close(); };
+  s.addEventListener('click', e => { const a = e.target.dataset.a; if (e.target === s || a === 'c') close(); if (a === 'o' && !okBtn.disabled){ const v = s; close(); onOk && onOk(v); } });
+  document.addEventListener('keydown', k); document.body.appendChild(s); okBtn.focus();
+}
+let toastT;
+function toast(msg, kind = 'ok'){
+  let t = $('#toast'); if (!t){ t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; t.innerHTML = '<i></i><span></span>'; $('#stage').appendChild(t); }
+  t.dataset.k = kind; t.querySelector('i').textContent = kind === 'ok' ? '✓' : '!'; t.querySelector('span').textContent = msg;
+  t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600);
+}
+const mapOptions = sel => Object.keys(MAPS).map(m => `<option ${m === sel ? 'selected' : ''}>${m}</option>`).join('');
+const STILL = '<label class="chk"><input type="checkbox" data-still>机器人已经站立、静止，周围没有人走动（FAST-LIO 初始化时机器人不能动）</label>';
+
+/* ---------- 启停（模拟耗时） ---------- */
+function startStack(kind, map, then){
+  S.busy = { nav: '正在启动导航…', loc: '正在启动定位…', map: '正在启动建图…' }[kind];
+  S.stack = 'none'; S.armed = false; S.run = null; render();
+  setTimeout(() => {
+    S.busy = null; S.stack = kind;
+    if (map){ if (map !== S.map) { S.map = map; S.est = null; S.routeId = null; } }
+    if (kind === 'map'){ S.est = null; S.mapping = { t0: performance.now(), saved: null, name: 'map_' + new Date().toTimeString().slice(0,5).replace(':',''), bag: false }; }
+    if (kind !== 'map' && S.truth.mapLost){ S.truth = { ...HOME }; }
+    toast({ nav: '导航已启动', loc: '定位已启动', map: '建图已启动' }[kind]);
+    then && then(); render();
+  }, 1800);
+}
+function lock(reason){ if (S.armed){ S.armed = false; if (reason) toast(reason, 'warn'); } }
+function cancelRun(msg){ if (S.run){ S.run = null; lock(); if (msg) toast(msg, 'warn'); } }
+
+/* ---------- 切换任务 ---------- */
+function switchTo(t){
+  if (S.busy || t === S.tab) return;
+  const running = S.run ? `当前多站任务「${esc(S.run.route.name)}」会被取消。` : '';
+  if (t === 'nav'){
+    if (S.stack === 'nav' || S.stack === 'loc'){
+      // 导航栈一直在：重定位 → 导航不用重启；只开了定位时要补上 Nav2，同样要静止确认
+      if (S.stack === 'nav'){ S.tab = 'nav'; S.openStep = null; render(); return; }
+    }
+    const fromMap = S.stack === 'map' && !S.mapping.saved;
+    modal({ title: '启动导航', ok: '启动导航',
+      html: `<p>${S.stack === 'map' ? '将停止建图，' : S.stack === 'loc' ? '将停止定位，' : ''}启动 FAST-LIO、map_server、AMCL 和 Nav2。启动约需 10 秒，底盘保持锁定。</p>
+        ${fromMap ? '<div class="warnline">当前建图还没有保存，停止后地图会丢失。</div>' : ''}
+        <div class="hint" style="font-size:11px;color:var(--muted);margin-bottom:4px">导航用的地图</div>
+        <select data-map>${mapOptions(S.stack === 'map' && S.mapping.saved ? S.mapping.saved : S.map)}</select>${STILL}`,
+      need: s => s.querySelector('[data-still]').checked,
+      onOk: s => { const map = s.querySelector('[data-map]').value; S.tab = 'nav'; S.openStep = null; startStack('nav', map); } });
+    return;
+  }
+  if (t === 'reloc'){
+    if (S.stack === 'nav'){
+      const go = () => { cancelRun(); lock(); S.tab = 'reloc'; S.reloc.orig = S.est && { ...S.est }; render(); toast('导航栈保持运行，底盘已上锁', 'warn'); };
+      if (S.run) return modal({ title: '切换到重定位', html: `<p>${running}底盘会上锁，导航栈保持运行，改完位姿可以直接回到导航。</p>`, ok: '切换', danger: true, onOk: go });
+      return go();
+    }
+    // 导航没在跑：启动定位（map_server + AMCL）
+    modal({ title: '启动定位（重定位）', ok: '启动定位',
+      html: `<p>${S.stack === 'map' ? '将停止建图，' : ''}启动 FAST-LIO、map_server 和 AMCL（不启动 Nav2）。之后在地图上手动修正位姿。</p>
+        ${S.stack === 'map' && !S.mapping.saved ? '<div class="warnline">当前建图还没有保存，停止后地图会丢失。</div>' : ''}
+        <select data-map>${mapOptions(S.map)}</select>${STILL}`,
+      need: s => s.querySelector('[data-still]').checked,
+      onOk: s => { const map = s.querySelector('[data-map]').value; S.tab = 'reloc'; startStack('loc', map, () => { if (!S.est) S.est = { x: HOME.x + .9, y: HOME.y - .5, th: .25 }; S.reloc.orig = { ...S.est }; }); } });
+    return;
+  }
+  if (t === 'map'){
+    modal({ title: '切换到建图', ok: '开始建图', danger: S.stack !== 'none',
+      html: `<p>${running}${S.stack !== 'none' ? '将停止导航栈，' : ''}启动 FAST-LIO 和 slam_toolbox。建图从机器人当前位置开始，地图的 x 轴取机器人此刻的朝向。</p>${STILL}`,
+      need: s => s.querySelector('[data-still]').checked,
+      onOk: () => { cancelRun(); S.tab = 'map'; startStack('map'); } });
+  }
+}
+document.querySelectorAll('#tasks button').forEach(b => b.onclick = () => switchTo(b.dataset.t));
+
+/* ---------- 右栏内容 ---------- */
+function step(n, title, sub, state, body, key){
+  return `<div class="step ${S.openStep === key ? 'open' : ''}" data-s="${state}" data-key="${key || ''}">
+    <div class="step-h"><div class="step-n"><span>${n}</span></div><div class="step-t">${title}<span class="step-s">${sub || ''}</span></div>
+    ${state === 'done' && key ? `<button class="btn sm ghost" data-open="${key}">${S.openStep === key ? '收起' : '更改'}</button>` : ''}</div>
+    <div class="step-b">${body}</div></div>`;
+}
+const fmtT = s => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+function navBody(){
+  if (S.stack !== 'nav') return `<div class="note">导航没有运行。点上面的「导航」启动。</div>`;
+  if (S.run) return runCard();
+  const routes = ROUTES.filter(r => r.map === S.map), route = routes.find(r => r.id === S.routeId);
+  const m = scanCache && S.est ? scanCache.match : null;
+  const s1 = 'done', s2 = S.est ? 'done' : 'cur', s3 = !S.est ? 'todo' : route ? 'done' : 'cur', s4 = S.est && route ? 'done' : 'todo', s5 = S.est && route ? 'cur' : 'todo';
+  const loopTxt = S.round ? (S.loops ? `循环 ${S.loops} 圈` : '一直循环') : '单程';
+  return `<div class="flow">
+    ${step(1, '地图', S.map, s1, `
+      <p class="hint">换地图后 map_server 立即加载新图，AMCL 位姿作废，需要重新给初始位置。</p>
+      <div class="row"><select class="grow" id="mapSel">${mapOptions(S.map)}</select><button class="btn sm" id="mapLoad">加载</button></div>`, 'map')}
+    ${step(2, '初始位置', S.est ? `(${S.est.x.toFixed(2)}, ${S.est.y.toFixed(2)}) · ${deg(S.est.th).toFixed(0)}°${m != null ? ` · 匹配率 ${m.toFixed(0)}%` : ''}` : '还没有设置', s2, `
+      <p class="hint">在地图上按住机器人实际所在的位置，往车头方向拖一下再松开。设好后看激光点（绿＝贴墙，红＝悬空）是否和墙对上。</p>
+      <button class="btn ${S.tool === 'init' ? 'pri' : ''} full" id="initBtn">${S.tool === 'init' ? '正在地图上选择…（Esc 取消）' : '在地图上选择初始位置'}</button>`, 'init')}
+    ${step(3, '导航任务', route ? `${route.name} · ${route.pts.length} 站` : routes.length ? '选择一个任务' : '这张地图还没有任务', s3, `
+      <div class="row"><select class="grow" id="routeSel"><option value="">选择任务…</option>${routes.map(r => `<option value="${r.id}" ${r.id === S.routeId ? 'selected' : ''}>${esc(r.name)} · ${r.pts.length} 站</option>`).join('')}</select>
+        <button class="btn sm" id="routeNew">新建</button></div>
+      ${route ? `<ol class="stations">${route.pts.map(p => `<li>(${p[0].toFixed(1)}, ${p[1].toFixed(1)})</li>`).join('')}</ol><div class="row" style="margin-top:8px"><button class="btn sm ghost" id="routeEdit">编辑路线</button></div>` : ''}
+      <p class="hint" style="margin:8px 0 0">只列出属于当前地图的任务。新建 / 编辑沿用现在的「导航点」工具和确认、检查、保存流程。</p>`, 'route')}
+    ${step(4, '运行参数', `${loopTxt} · ${S.vx.toFixed(2)} m/s · ${S.wz.toFixed(1)} rad/s`, s4, `
+      <div class="row" style="margin-bottom:6px"><label class="row" style="gap:5px;font-size:12px"><input type="checkbox" id="round" ${S.round ? 'checked' : ''} style="accent-color:var(--accent)">循环</label>
+        <input type="number" id="loops" min="0" max="1000" value="${S.loops}" ${S.round ? '' : 'disabled'} style="width:64px"><span style="font-size:11.5px;color:var(--muted)">圈 · 0 = 一直循环</span></div>
+      <div class="sl"><label>最大 vx</label><input type="range" id="vx" min="0.1" max="1.2" step="0.05" value="${S.vx}"><output>${S.vx.toFixed(2)} m/s</output></div>
+      <div class="sl"><label>最大 wz</label><input type="range" id="wz" min="0.2" max="1.5" step="0.1" value="${S.wz}"><output>${S.wz.toFixed(1)} rad/s</output></div>`, 'param')}
+    ${step(5, '启动导航', s5 === 'cur' ? '确认后自动解锁出发' : '先完成上面几步', s5, `
+      <button class="btn pri big full" id="goBtn">启动导航</button>
+      <div class="big-btn-note">会弹出确认框列出这次的设置；确认后底盘自动解锁并立即出发。</div>`)}
+  </div>`;
+}
+function runCard(){
+  const R = S.run, n = R.route.pts.length;
+  const lap = R.round ? (R.loops ? `第 ${R.loop} / ${R.loops} 圈 · ` : `第 ${R.loop} 圈（一直循环）· `) : '';
+  const done = R.done;
+  return `<div class="run-card">
+    <div class="row" style="justify-content:space-between;margin-bottom:4px"><h4>${esc(R.route.name)}</h4><span class="pill" data-s="${done ? 'ok' : S.estop ? 'crit' : 'run'}">${done ? '已完成' : S.estop ? '急停' : '执行中'}</span></div>
+    <div class="sub">${done ? '全部站点已到达，底盘已上锁' : `${lap}正在前往第 ${R.i + 1} / ${n} 站`}</div>
+    <div class="prog"><div class="prog-bar" style="width:${(done ? 1 : R.prog) * 100}%"></div></div>
+    <div class="kv4"><div><span>站点</span><b>${Math.min(R.i + 1, n)}/${n}</b></div><div><span>用时</span><b>${fmtT(R.t)}</b></div><div><span>速度</span><b>${S.vx.toFixed(2)}</b></div><div><span>匹配率</span><b>${scanCache ? scanCache.match.toFixed(0) + '%' : '--'}</b></div></div>
+    <div class="row" style="margin-top:10px">${done ? '<button class="btn full" id="runClose">返回任务设置</button>' : '<button class="btn danger full" id="runCancel">取消任务（自动上锁）</button>'}</div>
+  </div>
+  ${S.driftNote ? '<div class="note warn" style="margin-top:8px">原型：跑了一段之后定位慢慢偏了（看激光点开始变红）。可以点上面的「重定位」修正。</div>' : ''}`;
+}
+function relocBody(){
+  if (S.stack !== 'nav' && S.stack !== 'loc') return `<div class="note">定位没有运行。点上面的「重定位」会先启动定位（map_server + AMCL）。</div>`;
+  if (!S.est) return `<div class="note warn">AMCL 还没有位姿，没有可以修正的估计。先回「导航」第 2 步给初始位置。</div>`;
+  const m = scanCache ? scanCache.match : 0, e = err(), o = S.reloc.orig, moved = o && S.est && (Math.hypot(S.est.x-o.x, S.est.y-o.y) > .001 || Math.abs(wrap(S.est.th-o.th)) > .001);
+  const col = m >= 80 ? 'var(--ok)' : m >= 50 ? 'var(--warn)' : 'var(--crit)';
+  const st = S.reloc.step, unit = [[.01, .5], [.05, 1], [.2, 5]][st];
+  return `<div class="flow">
+    <div class="note"><b>${S.stack === 'nav' ? '导航栈保持运行' : '只开了定位（没有 Nav2）'}</b> · 底盘已上锁。在当前估计的基础上手动修正，不是重新给初始位置。</div>
+    <div class="step" data-s="cur"><div class="step-h"><div class="step-n"><span>1</span></div><div class="step-t">看偏差<span class="step-s">激光按当前估计画在地图上</span></div></div>
+      <div class="step-b"><div class="match"><b style="color:${col}">${m.toFixed(0)}%</b><small>激光贴墙比例（匹配率）</small></div>
+        <div class="match-bar"><i style="width:${m}%;background:${col}"></i></div>
+        <div class="legend"><span><i style="background:#35d48a"></i>贴着墙</span><span><i style="background:#ff4b5c"></i>悬空 / 没对上</span></div>
+        ${e ? `<div class="delta" style="text-align:left;margin-top:6px">原型才看得到的真实误差：${e.d.toFixed(2)} m · ${e.a.toFixed(1)}°</div>` : ''}</div></div>
+    <div class="step" data-s="cur"><div class="step-h"><div class="step-n"><span>2</span></div><div class="step-t">手动微调<span class="step-s">方向键平移，Q / E 旋转</span></div></div>
+      <div class="step-b">
+        <div class="row" style="justify-content:space-between"><span style="font-size:11px;color:var(--muted)">步长</span>
+          <div class="seg2" id="stepSeg">${['1 cm · 0.5°','5 cm · 1°','20 cm · 5°'].map((t,i) => `<button data-i="${i}" class="${i === st ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+        <div class="pad">
+          <button data-n="rl" title="逆时针 (Q)">⟲</button><button data-n="u" title="上 (↑)">↑</button><button data-n="rr" title="顺时针 (E)">⟳</button>
+          <button data-n="l" title="左 (←)">←</button><button class="c" disabled>${unit[0]*100} cm<br>${unit[1]}°</button><button data-n="r" title="右 (→)">→</button>
+          <span></span><button data-n="d" title="下 (↓)">↓</button><span></span>
+        </div>
+        <p class="hint" style="margin:4px 0 0">也可以直接在地图上拖动青色机器人平移，按住 Shift 拖动旋转。改动在点「应用」之前不会发给 AMCL。</p>
+        ${o && S.est ? `<div class="delta">相对改动 Δx ${(S.est.x-o.x).toFixed(2)} · Δy ${(S.est.y-o.y).toFixed(2)} · Δθ ${deg(wrap(S.est.th-o.th)).toFixed(1)}°</div>` : ''}
+      </div></div>
+    <div class="step" data-s="cur"><div class="step-h"><div class="step-n"><span>3</span></div><div class="step-t">应用<span class="step-s">发给 AMCL（小协方差）</span></div></div>
+      <div class="step-b"><div class="row"><button class="btn ghost" id="relocUndo" ${moved ? '' : 'disabled'}>撤销改动</button><button class="btn pri grow" id="relocApply" ${moved ? '' : 'disabled'}>应用到 AMCL</button></div>
+        <button class="btn full" id="relocBack" style="margin-top:8px">${S.stack === 'nav' ? '完成，返回导航' : '完成，启动导航…'}</button></div></div>
+  </div>`;
+}
+function mapBody(){
+  if (S.stack !== 'map') return `<div class="note">建图没有运行。点上面的「建图」开始。</div>`;
+  const M = S.mapping, t = (performance.now() - M.t0) / 1000;
+  return `<div class="flow">
+    ${step(1, '建图中', `slam_toolbox · 已运行 ${fmtT(t)}`, 'done', '')}
+    ${step(2, '遥控走一圈', '按 T 进入遥控，WASD 移动', 'cur', `
+      <p class="hint">慢速走完整个区域，回到起点附近形成闭环。墙角、门口多停一下。</p>
+      <div class="row"><button class="btn grow" id="teleBtn">进入键盘遥控 (T)</button></div>
+      <label class="row" style="gap:6px;font-size:12px;margin-top:8px"><input type="checkbox" id="bagChk" ${M.bag ? 'checked' : ''} style="accent-color:var(--accent)">同时录包（data/bags）</label>`)}
+    ${step(3, '地图对齐（可选）', '沿墙选两点，把地图转正', 'cur', `
+      <div class="row"><button class="btn sm grow">沿墙选两点</button><button class="btn sm">对齐水平</button><button class="btn sm">对齐竖直</button></div>
+      <p class="hint" style="margin:6px 0 0">沿用现在的地图对齐功能，只是从底部抽屉挪到这里。</p>`)}
+    ${step(4, '保存地图', M.saved ? `已保存 ${M.saved}` : '还没有保存', M.saved ? 'done' : 'cur', `
+      <div class="row"><input type="text" class="grow" id="mapName" value="${esc(M.name)}"><button class="btn sm pri" id="mapSave">保存</button></div>
+      <p class="hint" style="margin:6px 0 0">可以多次保存，每次覆盖成当前进度。</p>`, 'save')}
+    ${step(5, '结束建图', M.saved ? '' : '先保存，否则地图会丢失', M.saved ? 'cur' : 'todo', `
+      <button class="btn pri full" id="mapToNav">用这张图去导航…</button>
+      <button class="btn ghost full" id="mapStop" style="margin-top:6px">停止建图</button>`)}
+  </div>`;
+}
+function render(){
+  scanCache = scan();
+  const tabs = document.querySelectorAll('#tasks button');
+  tabs.forEach(b => b.classList.toggle('on', b.dataset.t === S.tab));
+  const pill = $('#modePill');
+  const mode = S.busy ? ['warn', '启动中'] : S.estop ? ['crit', '急停'] : S.run && !S.run.done ? ['run', '执行中'] : S.stack === 'none' ? ['', '未运行'] : ['ok', { nav: '导航', loc: '定位', map: '建图' }[S.stack] + '运行中'];
+  pill.dataset.s = mode[0]; pill.textContent = mode[1];
+  $('#stackTxt').textContent = S.busy || { none: '未运行', nav: '导航（FAST-LIO · AMCL · Nav2）', loc: '定位（FAST-LIO · AMCL）', map: '建图（FAST-LIO · slam_toolbox）' }[S.stack];
+  $('#armTxt').textContent = S.armed ? '已解锁' : '已上锁';
+  $('#lock').dataset.s = S.armed ? 'off' : 'on'; $('#lockTxt').textContent = S.armed ? '已解锁 · 运动中' : '已上锁';
+  $('#lockBtn').disabled = !S.armed;
+  $('#busy').hidden = !S.busy; if (S.busy){ $('#busyT').textContent = S.busy; $('#busyS').textContent = '机器人保持静止（原型里约 2 秒）'; }
+  const body = S.tab === 'nav' ? navBody() : S.tab === 'reloc' ? relocBody() : S.tab === 'map' ? mapBody()
+    : `<div class="card-h"><h3>选择任务</h3></div><div class="note">机器人现在什么都没有运行。先在上面选择这次要做的事：<br><b>导航</b>：选地图 → 初始位置 → 任务 → 参数 → 启动<br><b>重定位</b>：导航跑久了定位偏了，停车手动修正<br><b>建图</b>：遥控走一圈，保存新地图</div>`;
+  $('#body').innerHTML = body;
+  const tip = $('#mapTip');
+  tip.hidden = !(S.tool === 'init' || S.tab === 'reloc' && S.est);
+  tip.innerHTML = S.tool === 'init' ? '<b>初始位置</b>：按住机器人所在位置，往车头方向拖动后松开' : '<b>重定位</b>：拖动青色机器人平移，Shift + 拖动旋转，或用方向键 / Q / E';
+  bind(); draw();
+}
+let softT = 0;
+function renderSoft(){ const n = performance.now(); if (n - softT > 80){ softT = n; render(); } }
+
+function bind(){
+  const on = (id, ev, f) => { const el = document.getElementById(id); if (el) el[ev] = f; };
+  document.querySelectorAll('[data-open]').forEach(b => b.onclick = () => { S.openStep = S.openStep === b.dataset.open ? null : b.dataset.open; render(); });
+  on('mapLoad', 'onclick', () => { const v = $('#mapSel').value; if (v === S.map) return; modal({ title: `切换到地图 ${v}`, html: '<p>map_server 会立即加载这张地图，AMCL 位姿作废，需要重新给初始位置。</p>', ok: '切换', onOk: () => { S.map = v; S.est = null; S.routeId = null; S.openStep = null; render(); toast(`已加载 ${v}`); } }); });
+  on('initBtn', 'onclick', () => { S.tool = S.tool === 'init' ? null : 'init'; render(); });
+  on('routeSel', 'onchange', e => { S.routeId = e.target.value || null; render(); });
+  on('routeNew', 'onclick', () => toast('原型：沿用现在的「导航点」工具新建', 'warn'));
+  on('routeEdit', 'onclick', () => toast('原型：沿用现在的路线编辑器', 'warn'));
+  on('round', 'onchange', e => { S.round = e.target.checked; render(); });
+  on('loops', 'onchange', e => { S.loops = clamp(Math.round(+e.target.value || 0), 0, 1000); render(); });
+  on('vx', 'oninput', e => { S.vx = +e.target.value; e.target.nextElementSibling.textContent = S.vx.toFixed(2) + ' m/s'; });
+  on('vx', 'onchange', () => render());
+  on('wz', 'oninput', e => { S.wz = +e.target.value; e.target.nextElementSibling.textContent = S.wz.toFixed(1) + ' rad/s'; });
+  on('wz', 'onchange', () => render());
+  on('goBtn', 'onclick', confirmGo);
+  on('runCancel', 'onclick', () => { cancelRun('任务已取消，底盘已上锁'); render(); });
+  on('runClose', 'onclick', () => { S.run = null; S.driftNote = false; render(); });
+  // 重定位
+  const seg = document.getElementById('stepSeg'); if (seg) seg.onclick = e => { const b = e.target.closest('[data-i]'); if (b){ S.reloc.step = +b.dataset.i; render(); } };
+  document.querySelectorAll('.pad [data-n]').forEach(b => b.onclick = () => nudge(b.dataset.n));
+  on('relocUndo', 'onclick', () => { S.est = { ...S.reloc.orig }; render(); });
+  on('relocApply', 'onclick', () => { S.reloc.orig = { ...S.est }; toast(`已发给 AMCL，匹配率 ${scanCache.match.toFixed(0)}%`); render(); });
+  on('relocBack', 'onclick', () => {
+    const o = S.reloc.orig, pending = o && S.est && (Math.hypot(S.est.x-o.x, S.est.y-o.y) > .001 || Math.abs(wrap(S.est.th-o.th)) > .001);
+    const go = () => { if (S.stack === 'nav'){ S.tab = 'nav'; S.driftNote = false; render(); } else switchTo('nav'); };
+    if (pending) return modal({ title: '还有改动没应用', html: '<p>位姿改动还没有发给 AMCL。要先应用吗？</p>', ok: '应用并返回', onOk: () => { S.reloc.orig = { ...S.est }; toast('已发给 AMCL'); go(); } });
+    go();
+  });
+  // 建图
+  on('teleBtn', 'onclick', () => toast('原型：沿用现在的键盘遥控', 'warn'));
+  on('bagChk', 'onchange', e => { S.mapping.bag = e.target.checked; toast(e.target.checked ? '开始录包' : '录包已停止'); });
+  on('mapName', 'oninput', e => { S.mapping.name = e.target.value; });
+  on('mapSave', 'onclick', () => { const n = S.mapping.name.trim() || 'map'; S.mapping.saved = n; if (!MAPS[n]) MAPS[n] = MAPS.lab_20261030; render(); toast(`地图已保存：${n}`); });
+  on('mapToNav', 'onclick', () => switchTo('nav'));
+  on('mapStop', 'onclick', () => modal({ title: '停止建图', html: '<p>将停止 slam_toolbox 和 FAST-LIO。已保存的地图不受影响。</p>', ok: '停止', danger: true, onOk: () => { S.stack = 'none'; S.tab = null; render(); } }));
+}
+function nudge(k){
+  if (!S.est) return;
+  const [d, a] = [[.01, .5], [.05, 1], [.2, 5]][S.reloc.step];
+  if (k === 'u') S.est.y += d; if (k === 'd') S.est.y -= d; if (k === 'l') S.est.x -= d; if (k === 'r') S.est.x += d;
+  if (k === 'rl') S.est.th = wrap(S.est.th + a * Math.PI / 180); if (k === 'rr') S.est.th = wrap(S.est.th - a * Math.PI / 180);
+  render();
+}
+function confirmGo(){
+  const route = ROUTES.find(r => r.id === S.routeId), m = scanCache ? scanCache.match : 0;
+  const lowWarn = m < 60 ? `<div class="warnline">匹配率只有 ${m.toFixed(0)}%，初始位置可能不准。建议先回第 2 步重新设置。</div>` : '';
+  modal({ title: '确认启动导航', ok: '解锁并出发',
+    html: `<div class="kv">
+      <span>地图</span><b>${S.map}</b>
+      <span>初始位置</span><b>(${S.est.x.toFixed(2)}, ${S.est.y.toFixed(2)}) ${deg(S.est.th).toFixed(0)}° · 匹配率 ${m.toFixed(0)}%</b>
+      <span>任务</span><b>${esc(route.name)} · ${route.pts.length} 站</b>
+      <span>循环</span><b>${S.round ? (S.loops ? `${S.loops} 圈（终点直接回 1 号站）` : '一直循环') : '单程'}</b>
+      <span>速度上限</span><b>${S.vx.toFixed(2)} m/s · ${S.wz.toFixed(1)} rad/s</b></div>
+      ${lowWarn}<p style="margin-bottom:14px">确认后底盘<b style="color:var(--warn)">自动解锁并立即出发</b>。随时可以按急停（Space）或「取消任务」。</p>`,
+    onOk: () => {
+      if (S.estop) return toast('急停中：先解除急停', 'err');
+      S.armed = true; S.openStep = null;
+      S.run = { route, i: 0, loop: 1, round: S.round, loops: S.loops, t: 0, prog: 0, done: false, legFrom: { ...S.truth } };
+      toast('底盘已解锁，出发');
+      render();
+    } });
+}
+
+/* ---------- 执行模拟：机器人沿站点走，定位误差慢慢累积 ---------- */
+let last = performance.now();
+function tick(t){
+  const dt = Math.min(.1, (t - last) / 1000); last = t;
+  const R = S.run;
+  if (R && !R.done && S.armed && !S.estop){
+    R.t += dt;
+    const tgt = R.route.pts[R.i], T = S.truth, v = S.vx * 3;     // 原型里放快 3 倍
+    const dx = tgt[0] - T.x, dy = tgt[1] - T.y, dist = Math.hypot(dx, dy);
+    const step_ = Math.min(dist, v * dt);
+    if (dist > .02){
+      const h = Math.atan2(dy, dx); T.th = T.th + clamp(wrap(h - T.th), -S.wz*3*dt, S.wz*3*dt);
+      T.x += step_ * dx / dist; T.y += step_ * dy / dist;
+      // 估计位姿跟着走，但带一点系统误差 → 跑久了慢慢偏
+      if (S.est){ S.est.x += step_ * dx / dist * 1.03; S.est.y += step_ * dy / dist * 1.03 - step_ * .01; S.est.th = wrap(S.est.th + (T.th - S.est.th) * .9 + .0025 * step_); }
+    } else {
+      R.i++;
+      const n = R.route.pts.length;
+      if (R.i >= n){
+        if (R.round && (R.loops === 0 || R.loop < R.loops)){ R.i = 0; R.loop++; }
+        else { R.done = true; S.armed = false; toast('多站任务完成，底盘已上锁'); }
+      }
+    }
+    R.prog = R.done ? 1 : (R.i + (1 - Math.min(1, dist / 6))) / R.route.pts.length;
+    if (scanCache && scanCache.match < 70) S.driftNote = true;
+    renderSoft();
+  }
+  draw();
+  requestAnimationFrame(tick);
+}
+
+/* ---------- 键盘、急停、重置 ---------- */
+window.addEventListener('keydown', e => {
+  if (e.target.closest('input,select,textarea')) return;
+  if (e.code === 'Space'){ e.preventDefault(); return estop(); }
+  if (e.key === 'Escape' && S.tool){ S.tool = null; render(); return; }
+  if (S.tab === 'reloc'){
+    const k = { ArrowUp: 'u', ArrowDown: 'd', ArrowLeft: 'l', ArrowRight: 'r', q: 'rl', e: 'rr', Q: 'rl', E: 'rr' }[e.key];
+    if (k){ e.preventDefault(); nudge(k); }
+  }
+});
+function estop(){
+  if (S.estop){
+    return modal({ title: '解除急停', html: '<p>解除后底盘仍保持上锁，重新启动任务时才会解锁。</p>', ok: '解除', onOk: () => { S.estop = false; render(); } });
+  }
+  S.estop = true; if (S.run && !S.run.done) S.run = null; S.armed = false; toast('已急停：任务已取消，底盘已上锁', 'err'); render();
+}
+$('#estopBtn').onclick = estop;
+$('#lockBtn').onclick = () => { cancelRun(); lock(); render(); toast('底盘已上锁', 'warn'); };
+$('#reset').onclick = () => { S = fresh(); render(); };
+new ResizeObserver(() => { resize(); draw(); }).observe($('#stage'));
+resize(); render(); requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -35,5 +35,10 @@ echo "地图：$MAP"
 echo "ROS 模式（假机器人）：http://127.0.0.1:$PORT"
 echo "纯前端模拟：        http://127.0.0.1:$PORT/?mock"
 echo "按 Ctrl+C 停止"
-exec env PYTHONPATH="$PWD/dev/fake_ros" GO2W_FAKE_MAP="$MAP" GO2W_DATA="$DATA" GO2W_FAKE_PROCS=1 \
+# 假摄像头：循环回放 dev/camera_sample.rtp（真机录的 10 s 前置摄像头组播），后端改成收单播
+CAM_PORT=$((PORT + 9100))
+GO2W_FAKE_CAM_PORT=$CAM_PORT "$VENV/bin/python" dev/fake_camera.py & CAM_PID=$!
+trap 'kill $CAM_PID 2>/dev/null' EXIT
+env PYTHONPATH="$PWD/dev/fake_ros" GO2W_FAKE_MAP="$MAP" GO2W_DATA="$DATA" GO2W_FAKE_PROCS=1 \
+  GO2W_CAM_ADDR="127.0.0.1:$CAM_PORT" \
   "$VENV/bin/python" server/go2w_web.py --port "$PORT"

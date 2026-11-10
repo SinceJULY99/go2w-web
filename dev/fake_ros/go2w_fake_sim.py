@@ -94,7 +94,7 @@ class Sim:
         self.th, self.v, self.w_ = 0.0, 0.0, 0.0
 
         # 进程：开机时导航已经在跑（和平时 nav.sh start 之后一样）
-        self.procs = {'mapping': False, 'localization': False, 'navigation': True, 'patrol': False, 'bag': False}
+        self.procs = {'mapping': False, 'localization': False, 'navigation': True, 'patrol': False, 'bag': False, 'bridge': False}
         self.ready_at = {'navigation': 0.0}
         # 假 cmd_bridge
         self.armed = False
@@ -109,6 +109,8 @@ class Sim:
     def load(self, yaml_path):
         self.grid, self.res, self.ox, self.oy = load_map(yaml_path)
         self.map_name = os.path.basename(yaml_path)[:-5]
+        if not hasattr(self, 'yaml_param'):
+            self.yaml_param = self.map_name   # map_server 的 yaml_filename：启动时的地图
         self.h, self.w = self.grid.shape
         safe = self.grid == 0          # 离障碍物 SAFE 以外的空闲区域（4 邻域腐蚀）
         for _ in range(max(1, int(SAFE / self.res))):
@@ -128,6 +130,10 @@ class Sim:
     def any_ready(self):
         return any(self.ready(m) for m in MODES)
 
+    def bridge_up(self):
+        """有速度桥：导航档自带的，或不开导航时的遥控速度桥。"""
+        return self.ready('navigation') or self.procs['bridge']
+
     def loc_ready(self):
         return self.ready('localization') or self.ready('navigation')
 
@@ -140,7 +146,9 @@ class Sim:
         if self.ready('mapping'):
             names += ['slam_toolbox']
         if self.ready('navigation'):
-            names += ['bt_navigator', 'controller_server', 'planner_server', 'go2w_cmd_bridge']
+            names += ['bt_navigator', 'controller_server', 'planner_server']
+        if self.bridge_up():
+            names += ['go2w_cmd_bridge']
         if self.procs['patrol']:
             names += ['go2w_patrol']
         if self.procs['bag']:
@@ -154,7 +162,9 @@ class Sim:
             return self.loc_ready() or self.ready('mapping')
         if topic in ('/amcl_pose', '/particle_cloud', '/initialpose'):
             return self.loc_ready()
-        if topic in ('/global_costmap/costmap', '/local_costmap/costmap', '/plan', '/cmd_vel', '/behavior_tree_log', '/go2w_cmd_bridge/armed'):
+        if topic in ('/cmd_vel', '/go2w_cmd_bridge/armed'):
+            return self.bridge_up()
+        if topic in ('/global_costmap/costmap', '/local_costmap/costmap', '/plan', '/behavior_tree_log'):
             return self.ready('navigation')
         if topic == '/patrol_pose':
             return False
@@ -168,6 +178,7 @@ class Sim:
     def start_mode(self, mode, map_yaml):
         if map_yaml:
             self.load(os.path.join(DATA, 'maps', f'{map_yaml}.yaml'))
+            self.yaml_param = map_yaml
             self.deliver_map()
         self.procs[mode] = True
         self.ready_at[mode] = time.monotonic() + START_DELAY
@@ -179,6 +190,7 @@ class Sim:
             self.finish(CANCELED)
         for m in MODES:
             self.procs[m] = False
+        self.procs['bridge'] = False   # 真机上同一个 pkill 模式会顺带杀掉遥控速度桥
         self.armed = False
         self.v = self.w_ = 0.0
         self.rosout(20, 'launch', 'all processes have finished cleanly')
@@ -211,7 +223,7 @@ class Sim:
             f.write(f'P5\n{self.w} {self.h}\n255\n'.encode() + np.flipud(img).tobytes())
         with open(out + '.yaml', 'w') as f:
             f.write(f'image: {name}.pgm\nresolution: {self.res}\norigin: [{self.ox}, {self.oy}, 0.0]\n'
-                    f'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n')
+                    f'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
         return True
 
     # ---------- 假 patrol.py（日志文案和 scripts/patrol.py 一致，网页靠它跟踪进度） ----------
@@ -283,7 +295,9 @@ class Sim:
 
     # ---------- 假服务 ----------
     def has_service(self, name):
-        if name.startswith('/go2w_cmd_bridge/') or name == '/navigate_to_pose/_action/cancel_goal':
+        if name.startswith('/go2w_cmd_bridge/'):
+            return self.bridge_up()
+        if name == '/navigate_to_pose/_action/cancel_goal' or '/clear_except_' in name:
             return self.ready('navigation')
         if name.startswith('/map_server/'):
             return self.loc_ready()
@@ -295,6 +309,10 @@ class Sim:
         from rcl_interfaces.msg import ParameterType, ParameterValue, SetParametersResult
         from rcl_interfaces.srv import GetParameters, SetParameters
         from std_srvs.srv import SetBool
+        if '/clear_except_' in name:
+            from nav2_msgs.srv import ClearCostmapExceptRegion
+            self.costmap_clears = getattr(self, 'costmap_clears', 0) + 1
+            return ClearCostmapExceptRegion.Response()
         if name == '/map_server/load_map':
             path = req.map_url.replace('/go2w/data', DATA, 1)
             if not os.path.exists(path):
@@ -303,7 +321,8 @@ class Sim:
             self.deliver_map()
             return LoadMap.Response(0)
         if name == '/map_server/get_parameters':
-            return GetParameters.Response([ParameterValue(4, string_value=f'/go2w/data/maps/{self.map_name}.yaml')])
+            # 真机的 map_server：load_map 服务换图后，yaml_filename 参数仍是启动时的那张（11-06 实测）
+            return GetParameters.Response([ParameterValue(4, string_value=f'/go2w/data/maps/{self.yaml_param}.yaml')])
         if name.endswith('/arm'):
             if req.data:
                 self.armed = True
@@ -560,7 +579,7 @@ class Sim:
         t = self.teleop
         if t and not nav_moving and now - t[3] < self.params['cmd_timeout']:
             tv, tw = t[0], t[2]          # 键盘遥控：cmd_bridge 只认最新的 /cmd_vel
-        if not self.armed or not self.ready('navigation'):
+        if not self.armed or not self.bridge_up():
             tv = tw = 0.0          # 上锁：cmd_bridge 不执行任何速度指令
         self.v += max(-dt, min(dt, tv - self.v))            # 加速度 1 m/s²
         self.w_ += max(-2*dt, min(2*dt, tw - self.w_))
@@ -732,12 +751,12 @@ def run(node):
             sim.feedback(now)
             g, t = sim.goal, sim.teleop
             teleop_live = t and now - t[3] < 0.5
-            if nav and ((g and g['status'] == EXECUTING) or teleop_live):   # /cmd_vel：导航或遥控时一直在发
+            if sim.bridge_up() and ((g and g['status'] == EXECUTING) or teleop_live):   # /cmd_vel：导航或遥控时一直在发
                 tw = Twist(); tw.linear.x, tw.angular.z = (sim.v, sim.w_) if not teleop_live else (t[0], t[2])
                 node.deliver('/cmd_vel', tw)
                 if g and g['status'] == EXECUTING and k % 40 == 0:
                     sim.rosout(20, 'controller_server', 'Passing new path to controller.')
-        if nav and k % 2 == 1:  # cmd_bridge 的 ~/armed 和真机一样按自己的频率发
+        if sim.bridge_up() and k % 2 == 1:  # cmd_bridge 的 ~/armed 和真机一样按自己的频率发
             b = Bool(); b.data = sim.armed; node.deliver('/go2w_cmd_bridge/armed', b)
         if alive and k % 10 == 0:  # 里程计健康 2 Hz
             b = Bool(); b.data = True; node.deliver('/odom_healthy', b)

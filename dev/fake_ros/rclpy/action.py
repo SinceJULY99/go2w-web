@@ -1,4 +1,10 @@
+import os
+import threading
+
 from rclpy._fake import Future
+
+# 真机 Nav2 接受一个导航目标要零点几秒；假的也等一下，这段时间里的界面状态才测得到
+ACCEPT_DELAY = float(os.environ.get('GO2W_FAKE_ACCEPT_DELAY', '0.3'))
 
 
 class ActionClient:
@@ -17,5 +23,5 @@ class ActionClient:
         if self.name == 'compute_path_to_pose':
             sim.later(lambda: fut.set_result(sim.compute_path(goal)))
         else:
-            sim.later(lambda: fut.set_result(sim.nav_send_goal(goal, feedback_callback)))
+            threading.Timer(ACCEPT_DELAY, lambda: sim.later(lambda: fut.set_result(sim.nav_send_goal(goal, feedback_callback)))).start()
         return fut

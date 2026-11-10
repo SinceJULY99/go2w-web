@@ -1,12 +1,12 @@
 // ROS 数据源：连 go2w_web 后端的 /ws。
 // P0：地图、位姿、scan、健康状态；P1：初始位姿、导航目标、取消、解锁 / 上锁、急停、调参、心跳
 // P2：代价地图、全局路径、局部轨迹（按 /cmd_vel 外推）、点云、AMCL 粒子、/rosout 日志
-import { gridToCanvas, costToCanvas, CLOUD } from '../util.js';
+import { gridToCanvas, costToCanvas, wallMask, CLOUD } from '../util.js';
 
-const T_MAP = 1, T_SCAN = 2, T_GCOST = 3, T_LCOST = 4, T_CLOUD = 5, T_PART = 6;
+const T_MAP = 1, T_SCAN = 2, T_GCOST = 3, T_LCOST = 4, T_CLOUD = 5, T_PART = 6, T_CAM = 7;
 // 已接入真机的操作；其余操作给出说明，不发任何指令
-const OPS = new Set(['initialPose', 'goal', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
-  'setMode', 'toggle', 'startPatrol', 'patrolPoint', 'saveRoute', 'startRoute', 'checkRoute', 'deleteRoute', 'saveMap', 'alignMap', 'loadMap', 'teleop']);
+const OPS = new Set(['initialPose', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
+  'setMode', 'toggle', 'saveRoute', 'startRoute', 'checkRoute', 'deleteRoute', 'saveMap', 'alignMap', 'loadMap', 'teleop', 'setMapView', 'deleteBag', 'uploadBag', 'setRollback', 'saveRollback']);
 const NOT_YET = {
   pause: '真机暂不支持暂停：可以取消任务，或者锁定底盘',
 };
@@ -23,6 +23,7 @@ export function createRosSource(store, bus){
   const t0 = performance.now(), now = () => (performance.now() - t0) / 1000;
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
   let ws = null, lastMsg = 0, mapGrid = null, rateWarned = -Infinity, seq = 0, pingPausedUntil = 0, lastTask = null;
+  let camWanted = false;                            // 摄像头标签页开着：断线重连后要重新申请
   let layers = [], gcost = null, rawPlan = null;   // rawPlan：后端最近一次的 /plan（任务结束后不再显示）
   let teleCmd = null, teleTimer = null;             // 键盘遥控：按住时每 0.1 s 发一次，后端 0.3 s 收不到就停
   const watchers = new Map();                       // topic 查看器：topic → Set(回调)
@@ -34,7 +35,6 @@ export function createRosSource(store, bus){
   store.link = { ok: false, ms: null };
   store.robot.valid = false;
   store.armed = null;
-  store.patrol = { A: null, B: null, loops: 0 };
 
   // 心跳放在 Worker 里：页面切到后台时主线程计时器会被降到 1 Hz 甚至更低，会误触发「心跳丢失」
   const beat = new Worker(URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 500)'], { type: 'text/javascript' })));
@@ -45,7 +45,7 @@ export function createRosSource(store, bus){
   function connect(){
     ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => { store.link.ok = true; lastMsg = performance.now(); log('INFO', 'go2w_web', `connected to ${url}`); sendLayers(); sendWatches(); };
+    ws.onopen = () => { store.link.ok = true; lastMsg = performance.now(); log('INFO', 'go2w_web', `connected to ${url}`); sendLayers(); sendWatches(); if (camWanted) ws.send(JSON.stringify({ t: 'cam', on: true })); };
     ws.onmessage = e => { lastMsg = performance.now(); typeof e.data === 'string' ? onJson(JSON.parse(e.data)) : onBinary(e.data); };
     ws.onclose = () => {
       if (store.link.ok) log('WARN', 'go2w_web', 'connection lost, retrying');
@@ -53,6 +53,7 @@ export function createRosSource(store, bus){
       store.robot.valid = false; store.odomOk = false; store.armed = null;
       for (const [, res] of pending) res({ ok: false, msg: '和后端的连接断开了' });
       pending.clear();
+      if (camWanted) bus.emit('cam', { state: 'disconnected' });
       setTimeout(connect, 1000);
     };
   }
@@ -83,6 +84,7 @@ export function createRosSource(store, bus){
   function onJson(m){
     switch (m.t){
       case 'pong': store.link.ms = performance.now() - m.ts; break;
+      case 'cam': bus.emit('cam', m); break;
       case 'ack': { const res = pending.get(m.id); if (res){ pending.delete(m.id); res({ ok: m.ok, msg: m.msg, data: m.data }); } break; }
       case 'log': log(m.level, m.node, m.msg); break;
       case 'logs': for (const [lv, node, msg] of m.items) log(lv, node, msg); break;
@@ -90,6 +92,7 @@ export function createRosSource(store, bus){
       case 'toast': bus.emit('toast', m.msg, m.level || 'warn'); break;
       case 'msg': for (const cb of watchers.get(m.topic) || []) cb(m); break;
       case 'routes': store.routes = m.items; break;
+      case 'map_views': store.mapViews = m.items || {}; break;
       case 'task': onTask(m.task); break;
       case 'pose': {
         const R = store.robot;
@@ -111,7 +114,7 @@ export function createRosSource(store, bus){
       case 'state': {
         store.mapBusy = !!m.mapBusy;
         if (store.mapCurrent && m.mapCurrent && store.mapCurrent !== m.mapCurrent){
-          store.patrol.A = store.patrol.B = store.goal = null;
+          store.goal = null;
           store.routeDraft = { id: null, map: null, points: [], confirmed: false };
           store.routeCheck = null;
         }
@@ -127,10 +130,8 @@ export function createRosSource(store, bus){
         store.maps = (m.maps || []).map(x => ({ name: x.name, meta: `${x.w ?? '?'}×${x.h ?? '?'} · ${x.res} m`, cur: x.name === cur, choice: x.name === choice }));
         store.mapCurrent = cur; store.mapChoice = choice;
         store.bags = (m.bags || []).map(b => ({ name: b.name, dur: b.dur ?? 0, size: b.size }));
-        if (m.patrol){
-          const pt = p => p ? { x: p[0], y: p[1], th: p[2] } : null;
-          store.patrol = { A: pt(m.patrol.A), B: pt(m.patrol.B), loops: m.patrol.loops, state: m.patrol.state };
-        }
+        store.uploads = m.uploads || {};
+        if (m.rollback) store.rollback = m.rollback;
         store.procsKnown = m.procsKnown; store.busy = m.busy;
         Object.assign(store.loc, { std: null, yaw: null, match: null }, m.loc || {});
         store.topics = m.topics.map(t => ({ name: t.name, type: t.type, d0: false, alive: t.pubs > 0, hz: t.hz }));
@@ -143,6 +144,8 @@ export function createRosSource(store, bus){
     const dv = new DataView(buf), kind = dv.getUint8(0), jlen = dv.getUint32(1, true);
     const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 5, jlen)));
     const payload = new Uint8Array(buf, 5 + jlen);
+    // 摄像头帧必须按到达顺序同步交给播放器（下面的分支有 await，会打乱顺序）
+    if (kind === T_CAM){ bus.emit('camFrame', meta, payload); return; }
     if (kind === T_SCAN){
       store.scan = new Float32Array(payload.slice().buffer);
     } else if (kind === T_GCOST || kind === T_LCOST){
@@ -161,6 +164,7 @@ export function createRosSource(store, bus){
     } else if (kind === T_MAP){
       const grid = await inflate(payload);
       mapGrid = { grid, ...meta };
+      store.wallAt = wallMask(grid, meta.w, meta.h, meta.res, meta.ox, meta.oy, meta.oyaw || 0);
       store.map = { img: gridToCanvas(grid, meta.w, meta.h), w: meta.w*meta.res, h: meta.h*meta.res,
         ox: meta.ox, oy: meta.oy, yaw: meta.oyaw || 0, res: meta.res, name: '/map', cells: `${meta.w}×${meta.h}` };
       // 光标读数和目标校验：有全局代价地图就用它（换算到 costmap_2d 的 0..254），否则用地图占用值粗略判断
@@ -184,26 +188,26 @@ export function createRosSource(store, bus){
   }
 
   const real = {
-    initialPose: p => send('initial_pose', p),
-    goal: g => send('goal', g),
+    initialPose: (p, fine) => send('initial_pose', fine ? { ...p, cov: 'fine' } : p),
     cancel: () => send('cancel'),
     arm: on => send('arm', { on }),
     estop: () => send('estop'),
     releaseEstop: () => send('release_estop'),
     setParam: (key, value) => send('set_param', { key, value }),
     // P3：运行档位、巡逻、录包、地图
-    setMode: mode => send('set_mode', { mode }),
-    toggle: id => id === 'patrol'
-      ? (store.profiles.patrol === 'stop' ? send('start_patrol', { loops: store.patrolLoops ?? 0 }) : send('stop_patrol'))
-      : (store.profiles.bag === 'stop'
-        ? send('bag_start', { topics: (store.bagTopics || '').trim().split(/\s+/).filter(Boolean) })
-        : send('bag_stop')),
+    setMode: (mode, map) => send('set_mode', map ? { mode, map } : { mode }),
+    toggle: () => store.profiles.bag === 'stop'
+      ? send('bag_start', { topics: (store.bagTopics || '').trim().split(/\s+/).filter(Boolean) })
+      : send('bag_stop'),
     saveRoute: route => send('route_save', route),
+    setMapView: (map, angle) => send('map_view', { map, angle }),
     checkRoute: route => send('route_check', route, 35000),
     deleteRoute: route_id => send('route_delete', { route_id }),
-    startRoute: route_id => send('route_start', { route_id }),
-    startPatrol: () => send('start_patrol', { loops: store.patrolLoops ?? 0 }),
-    setPatrolPoint: (k, p) => send('patrol_point', { k, ...p }),
+    deleteBag: name => send('bag_delete', { name }, 30000),
+    uploadBag: name => send('bag_upload', { name }),
+    setRollback: on => send('rollback_set', { on }),
+    saveRollback: () => send('rollback_save', {}, 25000),
+    startRoute: (route_id, o = {}) => send('route_start', { route_id, round_trip: !!o.roundTrip, loops: o.loops ?? 1, arm: !!o.arm }),
     saveMap: name => send('save_map', { name }, 45000),
     alignMap: (source, name, angle) => send('align_map', { source, name, angle }, 125000),
     loadMap: name => send('load_map', { name }),
@@ -232,6 +236,8 @@ export function createRosSource(store, bus){
     // 任务卡片的步骤（真机上从 Nav2 行为树日志看得到的阶段）
     steps: [['plan', '规划路径', 'Theta*'], ['follow', '跟随路径', 'RotationShim · MPPI'], ['recover', '恢复行为', '需要时'], ['arrive', '到达', 'goal checker']],
     inspect: () => null,
+    // 摄像头：on = 要看 / 不看了；take = 别人正在看时接管
+    camera: { set(on, take = false){ camWanted = on; if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'cam', on, take })); } },
     // topic 查看器：订阅一个 topic 的消息内容（后端最多 2 Hz），返回取消函数
     watch(topic, cb){
       if (!watchers.has(topic)){ watchers.set(topic, new Set()); if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'inspect', topic, on: true })); }

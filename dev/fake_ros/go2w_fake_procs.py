@@ -35,6 +35,15 @@ class FakeProcs:
     async def start_patrol(self, loops):
         self.sim.later(lambda: self.sim.patrol_start(loops))
 
+    async def start_bridge(self):
+        self.sim.procs['bridge'] = True
+
+    async def stop_bridge(self):
+        self.sim.procs['bridge'] = False
+        self.sim.armed = False
+        await asyncio.sleep(0.3)
+        return True
+
     async def stop_patrol(self):
         self.sim.later(lambda: self.sim.patrol_stop('patrol.py 收到 SIGINT'))
 
@@ -44,6 +53,30 @@ class FakeProcs:
     async def stop_bag(self):
         self.sim.later(self.sim.bag_stop)
         await asyncio.sleep(0.5)
+
+    async def start_rollback(self, seconds):
+        self.sim.procs['rollback'] = True
+        self._rollback = asyncio.create_task(self._rollback_loop(seconds))
+
+    async def stop_rollback(self):
+        self.sim.procs['rollback'] = False
+        self._rollback.cancel()
+
+    async def _rollback_loop(self, seconds):
+        """和 scripts/rollback_recorder.py 相同的文件约定，包内容是假的。"""
+        bags = Path(os.environ['GO2W_DATA']) / 'bags'
+        request = bags / '.rollback' / 'request'
+        while True:
+            await asyncio.sleep(0.2)
+            if not request.exists():
+                continue
+            name = request.read_text().strip()
+            request.unlink()
+            (bags / name).mkdir(parents=True)
+            (bags / name / f'{name}_0.mcap').write_bytes(b'\0' * int(seconds * 50_000))
+            (bags / name / 'metadata.yaml').write_text(
+                f'rosbag2_bagfile_information:\n  version: 5\n  storage_identifier: mcap\n'
+                f'  duration:\n    nanoseconds: {int(seconds * 1e9)}\n')
 
     async def save_map(self, name):
         await asyncio.sleep(1.0)

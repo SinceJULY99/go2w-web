@@ -1,6 +1,6 @@
 // P1 协议回归测试：先运行 web/dev/run.sh，再在 Mac 上运行 node web/dev/test_protocol.mjs [ws://127.0.0.1:8080/ws]
 // 会解锁、导航、急停、断心跳，只能对本地假 ROS 运行，不要指向真机
-// 测试目标点是按默认地图 data/maps/lab_20261021 选的空旷处，换地图会失败
+// 测试目标点是按默认地图 data/maps/lab_20261021 选的空旷处（离墙和未知区域 0.6 m 以上），换地图会失败
 const URL_ = process.argv[2] || 'ws://127.0.0.1:8080/ws';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function client(){
@@ -27,17 +27,18 @@ await c.cmd('initial_pose', { x: 0.01, y: 0.0, th: 0 }); await sleep(800);
 // 1. 正常导航
 let r = await c.cmd('arm', { on: true }); ok('解锁', r.ok, r.msg);
 await c.until(() => c.state.armed === true, 3000, '解锁生效');
-r = await c.cmd('goal', { x: 0.61, y: -3.96, th: 1.57 }); ok('发目标', r.ok, r.msg);
+r = await c.cmd('goal', { x: 3.06, y: -2.71, th: 1.57 }); ok('发目标', r.ok, r.msg);
 const phases = new Set(); let rem0 = null, remMin = 1e9;
 const t0 = Date.now();
-while (Date.now() - t0 < 40000) { const t = c.task; if (t) { phases.add(t.phase); if (t.remaining != null) { rem0 ??= t.remaining; remMin = Math.min(remMin, t.remaining); } if (t.status !== 'active') break; } await sleep(100); }
+// 只看这个单点目标：刚连上时可能还收到上一条路线任务结束后保留的结果
+while (Date.now() - t0 < 40000) { const t = c.task; if (t?.type === 'goal') { phases.add(t.phase); if (t.remaining != null) { rem0 ??= t.remaining; remMin = Math.min(remMin, t.remaining); } if (t.status !== 'active') break; } await sleep(100); }
 ok('到达目标', c.task?.status === 'succeeded', `status=${c.task?.status} 用时 ${((Date.now()-t0)/1000).toFixed(1)} s`);
 ok('看到规划→跟随→到达阶段', phases.has('plan') && phases.has('follow') && phases.has('arrived'), [...phases].join(','));
 ok('剩余距离递减', rem0 > 1 && remMin < 0.3, `从 ${rem0?.toFixed(2)} 到 ${remMin.toFixed(2)} m`);
-const p = c.pose; ok('位置在目标附近', Math.hypot(p.x - 0.61, p.y + 3.96) < 0.25, `(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`);
+const p = c.pose; ok('位置在目标附近', Math.hypot(p.x - 3.06, p.y + 2.71) < 0.25, `(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`);
 
 // 2. 急停
-r = await c.cmd('goal', { x: -6.34, y: -4.8, th: 0 }); ok('发第二个目标', r.ok, r.msg);
+r = await c.cmd('goal', { x: -1.44, y: 6.54, th: 0 }); ok('发第二个目标', r.ok, r.msg);
 await c.until(() => c.task?.phase === 'follow', 5000, '开始跟随');
 await sleep(1500);
 const before = { ...c.pose };
@@ -77,8 +78,8 @@ r = await c.cmd('set_param', { key: 'vmax', value: -1 }); ok('拒绝负数参数
 await c.cmd('set_param', { key: 'vmax', value: 1.0 });
 
 // 5. 初始位姿
-r = await c.cmd('initial_pose', { x: 0.61, y: -3.96, th: 0 }); ok('初始位姿', r.ok, r.msg);
-await sleep(600); ok('位姿跳到初始位姿', Math.hypot(c.pose.x - 0.61, c.pose.y + 3.96) < 0.05, `(${c.pose.x.toFixed(2)}, ${c.pose.y.toFixed(2)})`);
+r = await c.cmd('initial_pose', { x: 3.06, y: -2.71, th: 0 }); ok('初始位姿', r.ok, r.msg);
+await sleep(600); ok('位姿跳到初始位姿', Math.hypot(c.pose.x - 3.06, c.pose.y + 2.71) < 0.05, `(${c.pose.x.toFixed(2)}, ${c.pose.y.toFixed(2)})`);
 
 // 6. 控制方断开
 r = await c.cmd('arm', { on: true }); ok('解锁（准备断开测试）', r.ok, r.msg);

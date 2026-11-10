@@ -4,8 +4,8 @@ export function setupRouteEditor(store, actions, setTool){
   const select = $('#routeSelect'), name = $('#routeName'), list = $('#routePoints');
   const save = $('#routeSave'), run = $('#routeRun'), hint = $('#routeHint'), remove = $('#routeDelete');
   const confirm = $('#routeConfirm'), check = $('#routeCheck'), saveRow = $('#routeSaveRow');
-  const runHint = $('#routeRunHint');
-  let lastRoutes, lastDraft, savedDraft = store.routeDraft, saving = false, starting = false;
+  const runHint = $('#routeRunHint'), round = $('#routeRound'), loops = $('#routeLoops');
+  let lastRoutes, lastMap, lastDraft, savedDraft = store.routeDraft, saving = false, starting = false;
   const selected = () => store.routes.find(route => route.id === select.value);
 
   function edit(route = null){
@@ -26,6 +26,12 @@ export function setupRouteEditor(store, actions, setTool){
     render();
   }
 
+  // 往返循环：1 → … → N → … → 1 算一次；0 = 一直往返。只在启动时生效，不存进任务
+  const readLoops = () => Math.min(1000, Math.max(0, Math.round(+loops.value || 0)));
+  // 勾选循环后最后一站不再是终点：重画站点列表
+  round.onchange = () => { loops.disabled = !round.checked; lastDraft = null; render(); };
+  loops.onchange = () => { loops.value = readLoops(); };
+
   select.onchange = () => { edit(selected()); setTool('pan'); render(); };
   $('#routeNew').onclick = () => { select.value = ''; edit(); setTool('route'); render(); };
   run.onclick = async () => {
@@ -34,7 +40,7 @@ export function setupRouteEditor(store, actions, setTool){
     starting = true;
     render();
     try {
-      await actions.startRoute(route);
+      await actions.startRoute(route, { roundTrip: round.checked, loops: readLoops() });
     } finally {
       starting = false;
       render();
@@ -88,15 +94,17 @@ export function setupRouteEditor(store, actions, setTool){
 
   function render(){
     let draft = store.routeDraft;
-    if (store.routes !== lastRoutes){
-      lastRoutes = store.routes;
+    if (store.routes !== lastRoutes || store.mapCurrent !== lastMap){
+      lastRoutes = store.routes; lastMap = store.mapCurrent;
       if (draft.id && !store.routes.some(r => r.id === draft.id)){
         if (draft === savedDraft && name.value === (savedDraft.name || '')) edit();
         else store.routeDraft = { ...draft, id:null };
         draft = store.routeDraft;
       }
-      const options = store.routes.map(r => new Option(`${r.name} · ${r.map}`, r.id));
-      select.replaceChildren(new Option('选择已保存任务', ''), ...options);
+      // 只列当前地图的任务（正在编辑的那条例外，免得换图后选择框里找不到它）
+      const mine = store.routes.filter(r => r.map === store.mapCurrent || r.id === draft.id);
+      const options = mine.map(r => new Option(`${r.name} · ${r.points.length} 站${r.map === store.mapCurrent ? '' : ' · ' + r.map}`, r.id));
+      select.replaceChildren(new Option(mine.length ? '选择任务…' : '这张地图还没有任务', ''), ...options);
       select.value = draft.id || '';
     }
     if (draft !== lastDraft){
@@ -106,7 +114,7 @@ export function setupRouteEditor(store, actions, setTool){
         const end = draft.confirmed && i === draft.points.length - 1;
         const angle = `${Math.round(deg(p.th))}°`;
         const heading = p.manualHeading === false ? (draft.confirmed ? `自动 ${angle}` : '自动朝向') : angle;
-        label.textContent = `${i + 1} 号点${end ? ' · 终点' : ''} · ${heading}`;
+        label.textContent = `${i + 1} 号点${end ? (round.checked ? ' · 之后回到 1 号点' : ' · 终点') : ''} · ${heading}`;
         label.title = `坐标 (${p.x.toFixed(2)}, ${p.y.toFixed(2)}) · ${heading}`;
         label.classList.toggle('route-end', end);
         const pointName = document.createElement('input');
@@ -167,7 +175,7 @@ export function setupRouteEditor(store, actions, setTool){
     else if (dirty && draft.points.length) runMessage = '请先确认并保存当前路线。';
     else if (preview?.pending) runMessage = '正在检查路径，完成后可以启动。';
     run.disabled = runningSelected || starting || !!runMessage;
-    const runText = runningSelected ? '导航任务执行中' : starting ? '正在启动…' : '启动导航任务';
+    const runText = runningSelected ? '导航任务执行中' : starting ? '正在启动…' : '启动导航';
     if (run.textContent !== runText) run.textContent = runText;
     if (runHint.textContent !== runMessage) runHint.textContent = runMessage;
     let message = '用「导航点」单击加点，拖拽可指定朝向。至少选两站。';

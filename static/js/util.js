@@ -42,9 +42,30 @@ export function gridToCanvas(grid, w, h){
   const c = cv.getContext('2d'), im = c.createImageData(w, h);
   for (let y=0;y<h;y++) for (let x=0;x<w;x++){
     const v = grid[y*w+x], p = ((h-1-y)*w+x)*4, n = ((x*7+y*13)%5);
-    const col = v===255 ? [7,11,17] : v>=65 ? [90,206,214] : v>25 ? [40,90,100] : [13+n,23+n,34+n];
+    // 未知区域透明：只画扫到的地面和墙，对齐预览旋转时不会出现整张图片的斜框
+    if (v === 255) continue;
+    const col = v>=65 ? [90,206,214] : v>25 ? [40,90,100] : [22+n,36+n,50+n];
     im.data[p]=col[0]; im.data[p+1]=col[1]; im.data[p+2]=col[2]; im.data[p+3]=255;
   }
   c.putImageData(im, 0, 0);
   return cv;
+}
+// 「贴墙」掩码：占用格（≥65，未知 255 不算）向外膨胀 tol 米（4 邻域，和后端算匹配率的 near_occ 一样）。
+// 返回 (x, y) → 是否在墙附近；地图可以带 oyaw。重定位用它给激光点上色、算匹配率。
+export function wallMask(grid, w, h, res, ox, oy, oyaw = 0, tol = 0.10){
+  let m = new Uint8Array(w * h);
+  for (let i = 0; i < m.length; i++) m[i] = grid[i] >= 65 && grid[i] !== 255 ? 1 : 0;
+  for (let k = 0, n = Math.max(1, Math.round(tol / res)); k < n; k++){
+    const o = m.slice();
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++){
+      const i = y * w + x; if (m[i]) continue;
+      if ((x > 0 && m[i-1]) || (x < w-1 && m[i+1]) || (y > 0 && m[i-w]) || (y < h-1 && m[i+w])) o[i] = 1;
+    }
+    m = o;
+  }
+  const c = Math.cos(oyaw), s = Math.sin(oyaw);
+  return (x, y) => {
+    const dx = x - ox, dy = y - oy, gx = Math.floor((c*dx + s*dy) / res), gy = Math.floor((-s*dx + c*dy) / res);
+    return gx >= 0 && gy >= 0 && gx < w && gy < h && m[gy * w + gx] === 1;
+  };
 }

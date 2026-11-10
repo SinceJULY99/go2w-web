@@ -24,22 +24,24 @@ export function createStore(){
     routes: [],
     routeDraft: { id: null, map: null, points: [], confirmed: false },
     routeCheck: null,
+    // angle：地图显示方向（只转画面）。按地图名存在后端，见 mapViews；points / target：「沿墙选两点」
     alignment: { points: [], angle: 0, target: null, source: null },
+    mapViews: {},
     mapSaving: false,
     mapBusy: false,
-    patrol: { A: null, B: null, loops: 5 },
     // task.phase: plan | align | follow | final | dwell | arrived
     task: { type: 'idle' },
     armed: null, estop: false, odomOk: false,
     loc: { running: false, std: null, yaw: null, match: null },
-    // 运行档位：mode 三选一，patrol / bag 可叠加
-    profiles: { mapping: 'stop', localization: 'stop', navigation: 'stop', patrol: 'stop', bag: 'stop' },
+    // 运行档位：mode 三选一，bag 可叠加；patrol 只用来识别命令行启动的 patrol.py
+    profiles: { mapping: 'stop', localization: 'stop', navigation: 'stop', patrol: 'stop', bag: 'stop', bridge: 'stop' },
     since: {},                      // 档位启动时间（秒）
     nodes: [],                      // [{ id, name, up }]
     sys: { cpu: null, mem: null, memTotal: null },
     topics: [],                     // [{ name, type, hz, alive, d0 }]
     params: { vmax: .45, wmax: 1.2, tmo: .3 },
-    maps: [], bags: [],
+    rollback: { on: true, run: false, saving: false, seconds: 20 },
+    maps: [], bags: [], uploads: {},   // uploads：包名 → { state: run/done/fail, pct, msg }
     odo: null, battery: null,
   };
 }

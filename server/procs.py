@@ -4,6 +4,7 @@ go2w_web 容器通过挂载的 /var/run/docker.sock 调 Docker Engine API 做 do
 所有 exec 都是后台执行：输出写进 /go2w/data/logs/，后端直接读文件；需要结果时轮询退出码。
 传进 shell 的名字都经过 SAFE_NAME / SAFE_TOPIC 校验，网页不能拼出任意命令。
 """
+import ast
 import asyncio
 import os
 import re
@@ -19,7 +20,15 @@ ENV = 'source /go2w/docker/ros_env.sh >/dev/null 2>&1; '
 LOGS = '/go2w/data/logs'
 # 各档位的 launch 进程（[x] 写法让 pgrep / pkill 不匹配到自己的命令行）
 LAUNCH = {m: f'[r]os2 launch go2w_bringup {m}.launch.py' for m in MODES}
-PATROL, BAG = '[p]atrol.py', '[r]os2 bag record'
+PATROL, BAG, ROLLBACK = '[p]atrol.py', '[r]os2 bag record', '[r]ollback_recorder.py'
+# 不开导航时给网页遥控用的独立速度桥（导航档自带一个，两者不能同时跑）
+BRIDGE = '[r]os2 launch go2w_bringup control.launch.py'
+# 回溯录制的 topic：网页默认录包列表 + MID360 原始点云和 IMU
+ROLLBACK_TOPICS = ('/tf /tf_static /robot_description /map /odom /odom_healthy /scan /amcl_pose /initialpose /particle_cloud '
+                   '/goal_pose /plan /transformed_global_plan /local_costmap/costmap /global_costmap/costmap '
+                   '/cmd_vel_nav /cmd_vel /go2w_cmd_bridge/armed /navigate_to_pose/_action/status '
+                   '/navigate_to_pose/_action/feedback /follow_path/_action/status /behavior_tree_log /rosout '
+                   '/livox/lidar /livox/imu')
 
 
 class DockerProcs:
@@ -68,10 +77,10 @@ class DockerProcs:
     # ---------- 高层操作 ----------
     async def status(self):
         """哪些进程在跑：一次 exec，用退出码的各个位表示。"""
-        checks = [*(LAUNCH[m] for m in MODES), PATROL, BAG]
+        checks = [*(LAUNCH[m] for m in MODES), PATROL, BAG, ROLLBACK, BRIDGE]
         script = 'r=0; ' + ' '.join(f'pgrep -f "{p}" >/dev/null && r=$((r|{1 << i}));' for i, p in enumerate(checks)) + ' exit $r'
         code = await self.run(script, 5.0)
-        keys = [*MODES, 'patrol', 'bag']
+        keys = [*MODES, 'patrol', 'bag', 'rollback', 'bridge']
         return {k: bool(code & (1 << i)) for i, k in enumerate(keys)}
 
     async def start_mode(self, mode, map_yaml=None):
@@ -93,8 +102,16 @@ class DockerProcs:
             f'pgrep -f "[r]os2 launch go2w_bringup" >/dev/null && exit 1; exit 0', 30.0)
         return code == 0
 
-    async def start_patrol(self, loops):
-        await self.spawn(f'mkdir -p {LOGS}; exec ros2 run go2w_bringup patrol.py --ros-args -p loops:={int(loops)} > {LOGS}/patrol.log 2>&1')
+    async def start_bridge(self):
+        log = f'{LOGS}/teleop_bridge.log'
+        await self.spawn(f'mkdir -p {LOGS}; exec ros2 launch go2w_bringup control.launch.py require_odom:=false > {log} 2>&1')
+
+    async def stop_bridge(self):
+        """SIGINT：速度桥退出前会先发 StopMove。返回是否停掉。"""
+        code = await self.run(
+            f'pkill -INT -f "{BRIDGE}"; for i in $(seq 1 16); do pgrep -f "{BRIDGE}" >/dev/null || break; sleep 0.5; done; '
+            f'pkill -9 -f "{BRIDGE}"; pkill -9 -f "[g]o2w_cmd_bridge.py"; sleep 0.3; pgrep -f "[g]o2w_cmd_bridge.py" >/dev/null && exit 1; exit 0', 15.0)
+        return code == 0
 
     async def stop_patrol(self):
         await self.run(f'pkill -INT -f "{PATROL}"; exit 0', 5.0)
@@ -107,6 +124,14 @@ class DockerProcs:
     async def stop_bag(self):
         await self.run(f'pkill -INT -f "{BAG}"; for i in $(seq 1 20); do pgrep -f "{BAG}" >/dev/null || break; sleep 0.5; done; '
                        f'chown -R 1000:1000 /go2w/data/bags; exit 0', 15.0)
+
+    async def start_rollback(self, seconds):
+        await self.spawn(f'mkdir -p /go2w/data/bags {LOGS}; '
+                         f'exec python3 /go2w/scripts/rollback_recorder.py --seconds {float(seconds)} {ROLLBACK_TOPICS} > {LOGS}/rollback.log 2>&1')
+
+    async def stop_rollback(self):
+        await self.run(f'pkill -INT -f "{ROLLBACK}"; for i in $(seq 1 10); do pgrep -f "{ROLLBACK}" >/dev/null || break; sleep 0.5; done; '
+                       f'pkill -9 -f "{ROLLBACK}"; exit 0', 10.0)
 
     async def save_map(self, name):
         assert SAFE_NAME.match(name)
@@ -149,7 +174,12 @@ def list_maps(maps_dir):
                 tok = f.read(64).split()
             if tok and tok[0] == b'P5':
                 w, h = int(tok[1]), int(tok[2])
-            out.append({'name': name, 'w': w, 'h': h, 'res': float(meta.get('resolution', 0)),
+            try:
+                origin = ast.literal_eval(meta.get('origin', ''))
+                ox, oy = float(origin[0]), float(origin[1])
+            except (ValueError, SyntaxError, TypeError, IndexError):
+                ox = oy = None
+            out.append({'name': name, 'w': w, 'h': h, 'res': float(meta.get('resolution', 0)), 'ox': ox, 'oy': oy,
                         'mtime': os.path.getmtime(os.path.join(maps_dir, fn))})
         except (OSError, ValueError, IndexError):
             continue
@@ -164,7 +194,7 @@ def list_bags(bags_dir):
         return out
     for name in names:
         d = os.path.join(bags_dir, name)
-        if not os.path.isdir(d):
+        if name.startswith('.') or not os.path.isdir(d):   # .rollback 是回溯录制的临时目录
             continue
         size, dur = 0, None
         for fn in os.listdir(d):

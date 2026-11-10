@@ -86,22 +86,30 @@
         <div class="alignment-preview" id="alignPreview" hidden></div>
         <div class="hud hud-tr">
           <button class="ib" id="vFollow" title="跟随机器人 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
+          <button class="ib" id="vRot" title="地图方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><g id="vRotNeedle"><path d="M12 4.5l3 7.5h-6z" fill="#ff6b6b" stroke="none"/><path d="M12 19.5l-3-7.5h6z" fill="currentColor" stroke="none" opacity=".55"/></g></svg></button>
           <button class="ib" id="vFit" title="适配地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
           <button class="ib" id="vIn" title="放大"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg></button>
           <button class="ib" id="vOut" title="缩小"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h14"/></svg></button>
+          <button class="ib" id="vCam" title="摄像头浮窗" aria-label="打开摄像头浮窗" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3"/></svg></button>
+        </div>
+        <div class="cam-float" id="camFloat" hidden>
+          <div class="cam-head" id="camHead" title="拖动移动位置"><span class="cam-title">前置摄像头</span><span class="sp"></span><button class="ib cam-x" id="camClose" title="关闭" aria-label="关闭摄像头浮窗"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+          <div class="cam-view"><video id="camVideo" muted playsinline autoplay disablepictureinpicture></video><div class="cam-msg" id="camMsg">正在连接摄像头…</div></div>
+          <div class="cam-bar"><span id="camInfo">同一时间只给一个网页传画面</span><span class="sp"></span><button class="btn sm" id="camTake" hidden>接管画面</button></div>
+          <div class="cam-grip" id="camGrip" title="拖动调整大小（保持比例），双击恢复默认"></div>
         </div>
         <div class="mode-tag" id="mapTag" hidden>建图中 · slam_toolbox</div>
         <div class="tele" id="teleHint" hidden>
           <div class="keys"><kbd data-k="q">Q</kbd><kbd data-k="w">W</kbd><kbd data-k="e">E</kbd><kbd data-k="a">A</kbd><kbd data-k="s">S</kbd><kbd data-k="d">D</kbd></div>
-          <div><b>键盘遥控</b><div style="color:var(--muted);font-size:11px;margin-top:2px">按住移动，松开即停 · W/S 前后 · A/D 转向 · Q/E 横移</div></div>
+          <div><b>键盘遥控</b><div style="color:var(--muted);font-size:11px;margin-top:2px">按住移动，松开即停 · W/S 前后 · A/D 转向 · Q/E 横移 · Z/C 换档</div></div>
+          <div class="gear" id="teleGear" title="速度档位（Z 降档 / C 升档）"><button>慢</button><button>中</button><button>快</button></div>
         </div>
         <div class="toolbar" id="toolbar">
           <button class="tool" data-tool="pan" title="选择 / 平移"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M5 3l14 8-6 2-2 6z"/></svg><span>平移</span><kbd>1</kbd></button>
           <button class="tool" data-tool="init" title="设置初始位姿：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="7"/><path d="M12 12l5-5M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><span>初始位姿</span><kbd>2</kbd></button>
-          <button class="tool" data-tool="goal" title="导航目标：点击并拖动方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 21V4h10l-2 4 2 4H6"/></svg><span>导航目标</span><kbd>3</kbd></button>
-          <button class="tool" data-tool="route" title="连续点击添加导航点"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 17l5-10 7 8"/><circle cx="6" cy="17" r="2"/><circle cx="11" cy="7" r="2"/><circle cx="18" cy="15" r="2"/></svg><span>导航点</span><kbd>7</kbd></button>
-          <button class="tool" data-tool="measure" title="测距"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg><span>测距</span><kbd>6</kbd></button>
-          <button class="tool" data-tool="align" title="沿墙选两点，对齐地图方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4v16h16M7 14l12-5M7 17h12"/></svg><span>地图对齐</span></button>
+          <button class="tool" data-tool="route" title="连续点击添加导航点"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 17l5-10 7 8"/><circle cx="6" cy="17" r="2"/><circle cx="11" cy="7" r="2"/><circle cx="18" cy="15" r="2"/></svg><span>导航点</span><kbd>3</kbd></button>
+          <button class="tool" data-tool="measure" title="测距"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 17L17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg><span>测距</span><kbd>4</kbd></button>
+          <button class="tool" data-tool="align" title="沿墙选两点，对齐地图方向"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4v16h16M7 14l12-5M7 17h12"/></svg><span>地图对齐</span><kbd>5</kbd></button>
           <div class="tsep"></div>
           <button class="tool" data-tool="teleop" title="键盘遥控"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10.5v4M5 12.5h4"/><circle cx="16" cy="11.5" r="1"/><circle cx="18" cy="13.5" r="1"/></svg><span>遥控</span><kbd>T</kbd></button>
         </div>
@@ -156,18 +164,22 @@
             <div class="mb">
               <div>
                 <h4>地图 <span class="mono" style="color:var(--muted);font-size:11px">data/maps</span></h4>
-                <div class="inrow"><input id="mapName" value="lab_20261030"><button class="btn sm" id="saveMap">保存当前地图</button></div>
-                <div class="alignment-controls">
-                  <div class="alignment-buttons"><button class="btn sm" id="alignSelect">沿墙选两点</button><button class="btn sm" id="alignHorizontal">对齐水平</button><button class="btn sm" id="alignVertical">对齐竖直</button><button class="btn sm ghost" id="alignReset">取消预览</button></div>
-                  <div id="alignStatus" class="meta">选择至少 0.5 米的直墙，推荐 1 米以上。</div>
-                  <button class="btn sm pri" id="saveAlignedMap" disabled>保存对齐地图</button>
-                  <span class="meta">原图用于续建，对齐副本用于导航。</span>
-                </div>
+                <div class="hint">保存地图、地图对齐在右栏「建图」里。</div>
                 <div id="mapList"></div>
               </div>
               <div>
                 <h4>录包 <span class="mono" style="color:var(--muted);font-size:11px">data/bags</span></h4>
-                <div class="inrow"><input id="bagTopics" value="/scan /odom /tf /plan /cmd_vel /lowstate"><button class="btn sm" id="bagBtn">开始录包</button></div>
+                <!-- 默认录一次导航的全过程（不含点云）；空格或换行分隔，可以直接增删，刷新页面恢复默认 -->
+                <div class="inrow bag-row"><textarea id="bagTopics" rows="4" spellcheck="false" autocomplete="off" aria-label="录包 topic，空格或换行分隔">/tf /tf_static /robot_description /map
+/odom /odom_healthy /scan /amcl_pose /initialpose /particle_cloud
+/goal_pose /plan /transformed_global_plan
+/local_costmap/costmap /global_costmap/costmap
+/cmd_vel_nav /cmd_vel /go2w_cmd_bridge/armed
+/navigate_to_pose/_action/status /navigate_to_pose/_action/feedback /follow_path/_action/status
+/behavior_tree_log /rosout</textarea><button class="btn sm" id="bagBtn">开始录包</button></div>
+                <label class="bag-tip bag-livox"><input type="checkbox" id="bagLivox"> 加录 MID360 原始点云 + IMU（/livox/lidar /livox/imu，约 4 MB/s，一小时十几 GB；雷达驱动随档位启动，没开档位时录不到）</label>
+                <div class="bag-tip">空格或换行分隔，可直接增删。要复现障碍物再加 /cloud_registered_body（数据量大）</div>
+                <div class="inrow rb-row"><label class="bag-livox"><input type="checkbox" id="rbOn"> 回溯录制</label><span class="meta rb-state" id="rbState"></span><button class="btn sm pri" id="rbSave">保存刚才 20 秒</button></div>
                 <div id="bagList"></div>
               </div>
             </div>
@@ -178,33 +190,81 @@
 
     <aside class="col right">
       <section class="panel card">
-        <details id="routesPanel" open>
-          <summary>多站导航任务</summary>
-          <div class="route-form">
-            <div class="inrow">
-              <select id="routeSelect" aria-label="已保存任务"></select>
-              <button class="btn sm" id="routeNew">新建</button>
-              <button class="btn sm danger" id="routeDelete" title="删除所选任务" hidden>删除</button>
-            </div>
-            <div class="route-launch">
-              <button class="btn pri" id="routeRun" aria-describedby="routeRunHint" disabled>启动导航任务</button>
-              <div class="route-hint" id="routeRunHint" aria-live="polite"></div>
-            </div>
-            <div class="route-hint" id="routeHint" aria-live="polite"></div>
-            <ol id="routePoints" class="route-points"></ol>
-            <div class="btn-row route-controls">
-              <button class="btn sm pri" id="routeConfirm">确认路线</button>
-              <button class="btn sm" id="routeCheck" hidden>检查路径</button>
-            </div>
-            <div class="inrow route-controls" id="routeSaveRow" hidden>
-              <input id="routeName" placeholder="任务名称" aria-label="任务名称" maxlength="60">
-              <button class="btn sm pri" id="routeSave">保存任务</button>
-            </div>
-          </div>
-        </details>
+        <div class="card-h"><h3>任务</h3><span class="pill" id="stackPill">--</span></div>
+        <div class="tasks" id="taskTabs">
+          <button data-t="nav">导航<small>多站任务</small></button>
+          <button data-t="reloc">重定位<small>修正定位</small></button>
+          <button data-t="map">建图<small>slam_toolbox</small></button>
+        </div>
+        <div class="robot-line"><span>运行中</span><b id="stackTxt">--</b><span class="sp"></span><span>底盘</span><b id="armTxt">--</b></div>
       </section>
 
-      <section class="panel card" id="taskCard">
+      <section class="panel card" id="flowNone">
+        <div class="note">先在上面选择这次要做的事：<br><b>导航</b>：选地图 → 初始位置 → 任务 → 参数 → 启动<br><b>重定位</b>：导航跑久了定位偏了，停车修正<br><b>建图</b>：遥控走一圈，保存新地图</div>
+      </section>
+
+      <section class="panel card" id="flowNav" hidden>
+        <div class="note" id="navOff" hidden>导航没有运行。<button class="btn sm pri" id="navStart">启动导航…</button></div>
+        <div class="flow" id="navFlow">
+          <div class="step" id="stMap" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>1</span></div><div class="step-t">地图<span class="step-s" id="stMapSub"></span></div><button class="btn sm ghost step-more" data-open="stMap" hidden>更改</button></div>
+            <div class="step-b">
+              <p class="hint">换地图后 map_server 立即加载新图，当前位姿作废，要重新给初始位置。</p>
+              <div class="inrow"><select id="navMapSel" aria-label="地图"></select><button class="btn sm" id="navMapLoad">加载</button></div>
+            </div>
+          </div>
+          <div class="step" id="stInit" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>2</span></div><div class="step-t">初始位置<span class="step-s" id="stInitSub"></span></div><button class="btn sm ghost step-more" data-open="stInit" hidden>更改</button></div>
+            <div class="step-b">
+              <p class="hint">用地图工具栏的「初始位姿」（快捷键 2）：在机器人实际位置按住，往车头方向拖动后松开。设好后看激光和墙是否对上。</p>
+              <div class="inrow"><button class="btn sm pri" id="navInitBtn">在地图上选择初始位置</button><button class="btn sm" id="navInitOk" title="AMCL 现在的位姿是对的，不用重新设置">当前位置正确</button></div>
+            </div>
+          </div>
+          <div class="step" id="stRoute" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>3</span></div><div class="step-t">导航任务<span class="step-s" id="stRouteSub"></span></div><button class="btn sm ghost step-more" data-open="stRoute" hidden>更改</button></div>
+            <div class="step-b">
+              <div class="route-form">
+                <div class="inrow">
+                  <select id="routeSelect" aria-label="已保存任务"></select>
+                  <button class="btn sm" id="routeNew">新建</button>
+                  <button class="btn sm danger" id="routeDelete" title="删除所选任务" hidden>删除</button>
+                </div>
+                <div class="route-hint" id="routeHint" aria-live="polite"></div>
+                <ol id="routePoints" class="route-points"></ol>
+                <div class="btn-row route-controls">
+                  <button class="btn sm pri" id="routeConfirm">确认路线</button>
+                  <button class="btn sm" id="routeCheck" hidden>检查路径</button>
+                </div>
+                <div class="inrow route-controls" id="routeSaveRow" hidden>
+                  <input id="routeName" placeholder="任务名称" aria-label="任务名称" maxlength="60">
+                  <button class="btn sm pri" id="routeSave">保存任务</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="step" id="stParam" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>4</span></div><div class="step-t">运行参数<span class="step-s" id="stParamSub"></span></div><button class="btn sm ghost step-more" data-open="stParam" hidden>更改</button></div>
+            <div class="step-b">
+              <div class="patrol-opt route-loop"><label><input type="checkbox" id="routeRound" aria-describedby="routeLoopTip">循环</label><input id="routeLoops" type="number" min="0" max="1000" value="1" aria-label="循环圈数" disabled><span>圈</span></div>
+              <div class="route-hint route-loop-tip" id="routeLoopTip">到终点后直接回 1 号点算一圈，不原路返回 · 0 圈 = 一直循环</div>
+              <div class="sl"><label for="slV">最大 vx</label><input type="range" id="slV" min="0.1" max="1.2" step="0.05" value="0.45"><output id="oV">0.45 m/s</output></div>
+              <div class="sl"><label for="slW">最大 wz</label><input type="range" id="slW" min="0.2" max="1.5" step="0.1" value="1.2"><output id="oW">1.2 rad/s</output></div>
+            </div>
+          </div>
+          <div class="step" id="stGo" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>5</span></div><div class="step-t">启动导航<span class="step-s" id="stGoSub"></span></div><button class="btn sm ghost step-more" data-open="stGo" hidden>更改</button></div>
+            <div class="step-b">
+              <div class="route-launch">
+                <button class="btn pri big" id="routeRun" aria-describedby="routeRunHint" disabled>启动导航</button>
+                <div class="route-hint" id="routeRunHint" aria-live="polite"></div>
+              </div>
+              <p class="hint">会弹出确认框列出这次的设置；确认后底盘自动解锁并立即出发。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel card" id="taskCard" hidden>
         <div class="card-h"><h3>导航任务</h3><span class="pill" id="taskPill">--</span></div>
         <div id="taskBody">
           <div class="task-title" id="taskTitle">--</div>
@@ -218,28 +278,79 @@
           </div>
           <ol class="steps" id="steps"></ol>
         </div>
-        <div class="empty" id="taskEmpty" hidden>当前没有任务。在地图上用「导航目标」点选一个位置，或用「导航点」创建多站任务。</div>
+        <div class="empty" id="taskEmpty" hidden>当前没有任务。在上方选择一个多站任务，或用地图工具栏的「导航点」新建。</div>
         <div class="btn-row">
           <button class="btn" id="btnPause">暂停</button>
           <button class="btn danger" id="btnCancel">取消</button>
         </div>
-        <details class="legacy-patrol">
-          <summary>A/B 往返巡逻</summary>
-          <div class="btn-row">
-            <button class="btn sm" data-tool="A">设 A 点</button>
-            <button class="btn sm" data-tool="B">设 B 点</button>
-            <button class="btn sm" id="btnPatrol">开始巡逻</button>
-          </div>
-          <div class="patrol-opt"><label for="patrolLoops">巡逻往返</label><input id="patrolLoops" type="number" min="0" max="1000" value="0"><span>次 · 0 = 一直往返</span></div>
-        </details>
       </section>
 
-      <section class="panel card">
-        <div class="card-h"><h3>运行档位</h3><button class="btn sm ghost" id="modeStop">全部停止</button></div>
-        <div class="modes" id="modes"></div>
-        <div class="procs" id="procs"></div>
-        <div class="nodes" id="nodes"></div>
-        <div class="safety debug-only"><span>安全测试：网页断线 3 s，底盘应自动停车并锁定</span><button class="btn sm ghost" id="simDrop">模拟断线</button></div>
+      <section class="panel card" id="flowReloc" hidden>
+        <div class="card-h"><h3>重定位</h3><span class="meta" id="relocMeta"></span></div>
+        <div class="note" id="relocNote"></div>
+        <div class="note warn" id="relocWait" hidden></div>
+        <div id="relocBody">
+          <div class="reloc-match"><b id="relocMatch">--</b><small id="relocMatchSub">激光贴墙比例（匹配率）</small></div>
+          <div class="reloc-bar"><i id="relocBar"></i></div>
+          <div class="reloc-legend"><span><i style="background:var(--ok)"></i>贴着墙</span><span><i style="background:var(--crit)"></i>悬空 / 没对上</span><span><i style="background:#38e1dc"></i>修正后的位置</span></div>
+          <div class="reloc-row"><span>步长</span>
+            <div class="seg2" id="relocSteps"><button data-i="0">1 cm · 0.5°</button><button data-i="1">5 cm · 1°</button><button data-i="2">20 cm · 5°</button></div></div>
+          <div class="reloc-pad" id="relocPad">
+            <button data-n="ccw" title="逆时针 (Q)">⟲</button><button data-n="u" title="上 (↑)">↑</button><button data-n="cw" title="顺时针 (E)">⟳</button>
+            <button data-n="l" title="左 (←)">←</button><span class="c" id="relocUnit"></span><button data-n="r" title="右 (→)">→</button>
+            <span></span><button data-n="d" title="下 (↓)">↓</button><span></span>
+          </div>
+          <p class="hint">方向键按屏幕方向平移，Q / E 旋转；也可以在地图上拖青色机器人平移、拖车头的圆点旋转。点「应用」之前不会发给 AMCL。</p>
+          <div class="reloc-delta" id="relocDelta"></div>
+          <div class="inrow"><button class="btn sm ghost" id="relocUndo" disabled>撤销改动</button><button class="btn sm pri" id="relocApply" disabled style="flex:1">应用到 AMCL</button></div>
+        </div>
+        <div class="inrow" style="margin-top:10px"><button class="btn sm" id="relocInit" title="偏得太远、微调不过来时，用「初始位姿」工具重新点一个位置">重新给位置</button><button class="btn sm" id="relocBack" style="flex:1">完成，返回导航</button></div>
+      </section>
+
+      <section class="panel card" id="flowMap" hidden>
+        <div class="note" id="mapOff" hidden>建图没有运行。<button class="btn sm pri" id="mapStart">开始建图…</button></div>
+        <div class="flow" id="mapFlow">
+          <div class="step" id="mpRun" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>1</span></div><div class="step-t">建图中<span class="step-s" id="mpRunSub"></span></div></div>
+            <div class="step-b">
+
+            </div>
+          </div>
+          <div class="step" id="mpTele" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>2</span></div><div class="step-t">遥控走一圈<span class="step-s" id="mpTeleSub"></span></div></div>
+            <div class="step-b">
+              <p class="hint">慢速走完整个区域，最后回到起点附近形成闭环；墙角、门口多停一下。遥控前要先在「底盘控制」里解锁。</p>
+              <div class="inrow"><button class="btn sm" id="mapTele">键盘遥控 (T)</button></div>
+              <label class="map-chk"><input type="checkbox" id="mapBag"><span>同时录包（data/bags；topic 在底部「地图与录包」里改）</span></label>
+            </div>
+          </div>
+          <div class="step" id="mpAlign" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>3</span></div><div class="step-t">地图对齐（可选）<span class="step-s" id="mpAlignSub"></span></div></div>
+            <div class="step-b">
+              <p class="hint">沿一面直墙选两点，把地图画面转正。</p>
+              <div class="alignment-controls">
+                <div class="alignment-buttons"><button class="btn sm" id="alignSelect">沿墙选两点</button><button class="btn sm" id="alignHorizontal">对齐水平</button><button class="btn sm" id="alignVertical">对齐竖直</button><button class="btn sm ghost" id="alignReset">复位方向</button></div>
+                <div id="alignStatus" class="meta">选择至少 0.5 米的直墙，推荐 1 米以上。</div>
+                <button class="btn sm pri" id="saveAlignedMap" disabled>保存对齐地图</button>
+                <span class="meta">一般不需要导出：显示方向只转画面就够了。导出的对齐副本坐标会变，路线和初始位姿要重做；原图保留用于续建。</span>
+              </div>
+            </div>
+          </div>
+          <div class="step" id="mpSave" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>4</span></div><div class="step-t">保存地图<span class="step-s" id="mpSaveSub"></span></div></div>
+            <div class="step-b">
+              <p class="hint">不会覆盖同名地图；可以多次保存，每次存成一个新名字（保存后自动换成下一个名字）。</p>
+              <div class="inrow"><input id="mapName" aria-label="地图名" maxlength="40" spellcheck="false"><button class="btn sm pri" id="saveMap">保存</button></div>
+            </div>
+          </div>
+          <div class="step" id="mpEnd" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>5</span></div><div class="step-t">结束建图<span class="step-s" id="mpEndSub"></span></div></div>
+            <div class="step-b">
+              <button class="btn pri" id="mapToNav" style="width:100%">用这张图去导航…</button>
+              <button class="btn ghost" id="mapStop" style="width:100%;margin-top:6px">停止建图</button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="panel card">
@@ -259,13 +370,21 @@
           <div class="arm-t"><b id="armT">--</b><span id="armS">--</span></div>
           <button class="btn sm" id="armBtn">解锁</button>
         </div>
-        <div class="sl"><label for="slV">最大 vx</label><input type="range" id="slV" min="0.1" max="1.2" step="0.05" value="0.45"><output id="oV">0.45 m/s</output></div>
-        <div class="sl"><label for="slW">最大 wz</label><input type="range" id="slW" min="0.2" max="1.5" step="0.1" value="1.2"><output id="oW">1.2 rad/s</output></div>
+        <div class="hint" style="margin-top:6px">启动导航时自动解锁；切换任务、取消、急停时自动上锁。遥控前需要手动解锁。</div>
         <div class="sl debug-only"><label for="slT">指令超时</label><input type="range" id="slT" min="0.1" max="1" step="0.1" value="0.3"><output id="oT">0.3 s</output></div>
+      </section>
+
+      <section class="panel card debug-only">
+        <div class="card-h"><h3>运行档位（调试）</h3><button class="btn sm ghost" id="modeStop">全部停止</button></div>
+        <div class="modes" id="modes"></div>
+        <div class="procs" id="procs"></div>
+        <div class="nodes" id="nodes"></div>
+        <div class="safety debug-only"><span>安全测试：网页断线 3 s，底盘应自动停车并锁定</span><button class="btn sm ghost" id="simDrop">模拟断线</button></div>
       </section>
     </aside>
   </div>
 </div>
+<script src="js/vendor/jmuxer.min.js"></script><!-- jmuxer 2.0.7（MIT，见 js/vendor/jmuxer.LICENSE）：H.264 → MSE，播放摄像头画面 -->
 <script type="module" src="js/main.js"></script>
 </body>
 </html>

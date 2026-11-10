@@ -1,5 +1,5 @@
 // 模拟数据源：示例实验室地图 + 机器人仿真。用于不连机器人时调界面（地址后加 ?mock）
-import { clamp, wrap, deg, gauss, mulberry32, gridToCanvas, CLOUD } from '../util.js';
+import { clamp, wrap, deg, gauss, mulberry32, gridToCanvas, wallMask, CLOUD } from '../util.js';
 
 /* ---------- 示例地图 24 × 16 m @ 0.05 ---------- */
 const RES = 0.05, MW = 24, MH = 16, GW = Math.round(MW/RES), GH = Math.round(MH/RES);
@@ -52,10 +52,12 @@ export function createMockSource(store, bus){
   store.map = { img: gridToCanvas(grid, GW, GH), w: MW, h: MH, ox: 0, oy: 0, res: RES, name: 'lab_20261021', cells: `${GW}×${GH}` };
   store.costmap = { img: costImg, w: MW, h: MH, ox: 0, oy: 0 };
   store.costAt = costAt;
+  store.wallAt = wallMask(grid, GW, GH, RES, 0, 0);
   store.link = { ok: true, ms: 23 };
   store.armed = true; store.battery = 76; store.odo = 1284;
-  store.patrol = { A: { x: 5.6, y: 4.6, th: Math.PI }, B: { x: 22.5, y: 11.2, th: 0 }, loops: 5 };
   store.mapCurrent = store.map.name;
+  const viewsKey = 'go2w.mock.mapViews';
+  try { store.mapViews = JSON.parse(localStorage.getItem(viewsKey) || '{}') || {}; } catch { store.mapViews = {}; }
   const routesKey = 'go2w.mock.routes';
   try {
     const saved = JSON.parse(localStorage.getItem(routesKey) || '[]');
@@ -66,7 +68,8 @@ export function createMockSource(store, bus){
   store.maps = [{ name:'lab_20261021', meta:`${GW}×${GH} · 0.05 m`, cur:true }, { name:'corridor_20261028', meta:'612×204 · 0.05 m' }, { name:'lab_20261018_old', meta:'470×318 · 0.05 m' }];
   store.bags = [{ name:'s7_nav4_162403', dur:1840, size:8120 }, { name:'s7_nav1_114954', dur:612, size:2790 }];
   Object.assign(store.robot, { valid: true, x: 5.6, y: 4.6, th: 0 });
-  store.profiles = { mapping: 'stop', localization: 'stop', navigation: 'run', patrol: 'run', bag: 'stop' };
+  store.profiles = { mapping: 'stop', localization: 'stop', navigation: 'run', patrol: 'stop', bag: 'stop' };
+  store.rollback = { on: true, run: true, saving: false, seconds: 20 };
   store.since = { navigation: -2405 };
   store.loc = { running: true, std: .035, yaw: 1.5, match: 91 };
 
@@ -109,13 +112,20 @@ export function createMockSource(store, bus){
   }
 
   /* ---------- 任务 ---------- */
-  const goalOf = () => task.type==='patrol' ? store.patrol[task.leg] : task.goal;
-  function startPatrol(){ task = { type:'patrol', leg:'B', loop:1, phase:'plan', planAt:S.t+.35, t0:S.t, recov:0 }; log('INFO','patrol',`start A↔B patrol, ${store.patrol.loops} loops`); }
+  const goalOf = () => task.goal;
   function startGoal(g){ task = { type:'goal', goal:g, phase:'plan', planAt:S.t+.35, t0:S.t, recov:0 };
     log('INFO','bt_navigator',`Begin navigating from (${R.x.toFixed(2)}, ${R.y.toFixed(2)}) to (${g.x.toFixed(2)}, ${g.y.toFixed(2)})`); }
   const routeActive = () => task.type === 'route' && !task.status;
-  function routeLeg(route, index, started){
-    task = { type:'route', route, index, started, goal:route.points[index], phase:'plan',
+  // 循环路线（和后端 route_next / route_pose 相同）：loops = null 单程，0 一直循环。
+  // 1 → … → 终点 → 1 算一圈，终点直接回起点；回到起点时按 1 号点自己的朝向停
+  function routeNext(n, loops, [i, loop, back]){
+    if (back) return loops === 0 || loop < loops ? [1, loop + 1, false] : null;
+    if (i < n - 1) return [i + 1, loop, false];
+    return loops != null ? [0, loop, true] : null;
+  }
+  const routePose = (points, i) => points[i];
+  function routeLeg(route, [index, loop, back], started, opt){
+    task = { type:'route', route, index, loop, back, opt, started, goal:routePose(route.points, index, back), phase:'plan',
       planAt:S.t+.35, t0:S.t, recov:0 };
   }
   function finishRoute(status, message){
@@ -134,10 +144,11 @@ export function createMockSource(store, bus){
   function lock(reason){ if (!store.armed) return; store.armed = false; log('WARN','go2w_cmd_bridge',`StopMove sent, LOCKED (${reason})`); }
   function arrive(){
     log('INFO','bt_navigator',`Goal succeeded (${(S.t-task.legT0).toFixed(1)} s)`);
-    if (task.type==='patrol'){ task.phase = 'dwell'; task.dwellUntil = S.t + 1.2; }
-    else if (task.type==='route'){
-      if (task.index + 1 === task.route.points.length) finishRoute('succeeded', '已到达全部导航点');
-      else routeLeg(task.route, task.index + 1, task.started);
+    if (task.type==='route'){
+      const { opt } = task, next = routeNext(task.route.points.length, opt.loops, [task.index, task.loop, task.back]);
+      opt.done++;
+      if (!next) finishRoute('succeeded', opt.loops == null ? '已到达全部导航点' : `已完成循环 ${opt.loops} 圈`);
+      else routeLeg(task.route, next, task.started, opt);
     }
     else { const g = task.goal; toast(`已到达目标 (${g.x.toFixed(2)}, ${g.y.toFixed(2)})`); task.phase = 'arrived'; task.doneAt = S.t; }
   }
@@ -174,11 +185,6 @@ export function createMockSource(store, bus){
         if (dGoal < .12 || (rem < .12 && dGoal < .3)) task.phase = 'final';
       } else { const e2 = wrap(g.th - R.th); tw = clamp(1.6*e2, -wmax*.7, wmax*.7); if (Math.abs(e2) < .04){ tw = 0; arrive(); } }
     }
-    if (task.phase==='dwell' && S.t>=task.dwellUntil){
-      if (task.leg==='B') task.leg = 'A'; else { task.leg = 'B'; task.loop++; }
-      if (task.loop > store.patrol.loops){ log('INFO','patrol','patrol finished'); toast('巡逻完成'); task = { type:'idle', phase:'idle' }; }
-      else { task.phase = 'plan'; task.planAt = S.t+.3; log('INFO','patrol',`leg ${task.leg==='B'?'A→B':'B→A'} (loop ${task.loop}/${store.patrol.loops})`); }
-    }
     if (task.doneAt != null && S.t - task.doneAt > (task.type === 'route' ? 10 : 4)) task = { type:'idle', phase:'idle' };
     if (S.keys && canMove()){ tv = S.keys.v; tw = S.keys.w; tvy = S.keys.vy; }
     store.cmd = { v: tv, w: tw, vy: tvy };
@@ -212,9 +218,13 @@ export function createMockSource(store, bus){
     store.task = { type: task.type, phase: task.phase, paused: S.paused, recoveries: task.recov,
       status: task.status || (task.phase === 'arrived' ? 'succeeded' : 'active'),
       remaining: rem, total: p ? p.total : null, elapsed: S.t - (task.legT0 ?? task.t0),
-      goal: task.goal, loop: task.loop, loops: store.patrol.loops, leg: task.leg };
+      goal: task.goal, loop: task.loop };
     if (task.type === 'route'){
-      Object.assign(store.task, { name:task.route.name, point:task.index + 1, count:task.route.points.length,
+      const n = task.route.points.length, { loops, done } = task.opt, per = n;   // 一圈到 n 站（含回到起点）
+      const total = loops == null ? n : loops === 0 ? null : 1 + loops * per;
+      Object.assign(store.task, { name:task.route.name, point:task.index + 1, count:n,
+        roundTrip:loops != null, loop:task.loop, loops, back:task.back,
+        progress: total ? done / total : done ? ((done - 1) % per) / per : 0,
         message:task.message, routeId:task.route.id, pointName:task.goal.name, elapsed:(task.doneAt ?? S.t) - task.started });
     }
   }
@@ -261,14 +271,12 @@ export function createMockSource(store, bus){
     setTimeout(() => { setState(id, 'stop'); log('INFO','launch',`[${PKG[id]}] process has finished cleanly`); }, 700);
   }
   function onUp(id){
-    if (id==='patrol' && task.type!=='patrol') startPatrol();
     if (id==='bag') S.bagT0 = S.t;
     if (id==='localization' || id==='navigation') Object.assign(store.loc, { std: .35, yaw: 12, match: 40 });
   }
   function onDown(id){
     if (['mapping','localization','navigation'].includes(id)){ log('ERROR','planar_odom','FAST-LIO odometry gap > 0.5 s, /odom_healthy = false'); lock('odom unhealthy'); }
     if (id==='navigation'){ cancelTask('Goal canceled: navigation stack stopped'); lock('nav stopped'); }
-    if (id==='patrol' && task.type==='patrol') cancelTask('patrol stopped');
     if (id==='bag'){ const d = S.t - S.bagT0; store.bags.unshift({ name:`go2w_${new Date().toTimeString().slice(0,5).replace(':','')}`, dur:d, size:d*4.6 }); toast('录包已保存'); }
   }
   const NODES = [['livox_lidar_publisher','雷达驱动','odom'],['fast_lio','FAST-LIO','odom'],['planar_odom','planar_odom','odom'],['pcl2scan_slam','pcl2scan','odom'],
@@ -281,7 +289,7 @@ export function createMockSource(store, bus){
     ['/amcl_pose','geometry_msgs/msg/PoseWithCovarianceStamped',5,'loc'], ['/particle_cloud','nav2_msgs/msg/ParticleCloud',5,'loc'],
     ['/plan','nav_msgs/msg/Path',1,'navigation'], ['/local_plan','nav_msgs/msg/Path',20,'navigation'], ['/cmd_vel','geometry_msgs/msg/Twist',20,'navigation'],
     ['/global_costmap/costmap','nav_msgs/msg/OccupancyGrid',1,'navigation'], ['/local_costmap/costmap','nav_msgs/msg/OccupancyGrid',5,'navigation'],
-    ['/go2w_cmd_bridge/armed','std_msgs/msg/Bool',10,'navigation'], ['/patrol_pose','geometry_msgs/msg/PoseStamped',0,'patrol'], ['/rosout','rcl_interfaces/msg/Log',0,'robot'],
+    ['/go2w_cmd_bridge/armed','std_msgs/msg/Bool',10,'navigation'], ['/rosout','rcl_interfaces/msg/Log',0,'robot'],
   ];
   const alive = src => src==='robot' ? S.link : src==='odom' ? odomOk() : src==='loc' ? locRun() : run(src);
   function syncGraph(){
@@ -302,8 +310,15 @@ export function createMockSource(store, bus){
       Object.assign(store.loc, { std: .4, yaw: 14, match: 38 }); amclViz(); log('INFO','amcl',`Setting pose: ${p.x.toFixed(3)} ${p.y.toFixed(3)} ${p.th.toFixed(3)}`); },
     goal(g){
       if (routeActive()) return { ok:false, msg:'多点任务进行中：请先取消任务' };
-      if (task.type==='patrol') stopProfile('patrol');
       startGoal(g);
+    },
+    setMapView(map, angle){
+      const views = { ...store.mapViews };
+      const a = Math.atan2(Math.sin(angle), Math.cos(angle));
+      if (Math.abs(a) < 1e-6) delete views[map]; else views[map] = +a.toFixed(6);
+      store.mapViews = views;
+      try { localStorage.setItem(viewsKey, JSON.stringify(views)); } catch {}
+      return { ok:true };
     },
     saveRoute({ route_id, name, map, points }){
       const id = route_id || globalThis.crypto?.randomUUID?.() || `mock-${Date.now()}-${Math.random()}`;
@@ -317,6 +332,31 @@ export function createMockSource(store, bus){
       store.routes = routes;
       return { ok:true, data:record };
     },
+    setRollback(on){
+      store.rollback = { ...store.rollback, on, run:on };
+      return { ok:true, msg:`回溯录制已${on ? '打开' : '关闭'}（模拟）` };
+    },
+    saveRollback(){
+      if (!store.rollback.run) return { ok:false, msg:'回溯录制没在运行' };
+      const name = `snap_${new Date().toTimeString().slice(0,8).replace(/:/g,'')}`;
+      store.bags = [{ name, dur:store.rollback.seconds, size:86 }, ...store.bags];
+      return { ok:true, msg:`已保存回溯 ${name}（模拟）` };
+    },
+    uploadBag(name){
+      if (Object.values(store.uploads).some(u => u.state === 'run')) return { ok:false, msg:'正在上传别的包，等它传完' };
+      store.uploads = { ...store.uploads, [name]: { state:'run', pct:0, msg:'连接中' } };
+      const tick = setInterval(() => { const u = store.uploads[name]; if (!u || u.state !== 'run') return clearInterval(tick);
+        const pct = Math.min(100, u.pct + 20);
+        store.uploads = { ...store.uploads, [name]: pct < 100 ? { state:'run', pct, msg:'11.2MB/s' } : { state:'done', pct:100, msg:'刚刚' } }; }, 600);
+      return { ok:true, msg:`开始上传 ${name} → 166:~/go2w_bags（模拟）` };
+    },
+    deleteBag(name){
+      if (run('bag') && store.bags[0]?.name === name) return { ok:false, msg:`${name} 正在录制，先停止录包再删` };
+      const bags = store.bags.filter(b => b.name !== name);
+      if (bags.length === store.bags.length) return { ok:false, msg:`data/bags 里没有 ${name}` };
+      store.bags = bags;
+      return { ok:true, msg:`已删除录包 ${name}（模拟）` };
+    },
     deleteRoute(id){
       if (routeActive() && task.route.id === id) return { ok:false, msg:'请先结束正在执行的任务' };
       const routes = store.routes.filter(r => r.id !== id);
@@ -329,18 +369,21 @@ export function createMockSource(store, bus){
       store.routes = routes;
       return { ok:true };
     },
-    startRoute(id){
+    startRoute(id, o = {}){
       const route = store.routes.find(r => r.id === id);
+      if (o.arm && !store.estop && run('navigation')){ store.armed = true; log('INFO','go2w_cmd_bridge','ARMED (启动任务前自动解锁)'); }
       if (!route || route.map !== store.mapCurrent || !canMove() || S.keys || run('patrol') ||
           (task.type !== 'idle' && task.doneAt == null)){
         return { ok:false, msg:'请确认地图、导航及底盘状态，并结束其他任务' };
       }
-      routeLeg(route, 0, S.t);
+      const loops = o.roundTrip ? Math.min(1000, Math.max(0, Math.round(+o.loops || 0))) : null;
+      // 和后端一样：离第 1 站不到 0.5 m 就直接去第 2 站
+      const p0 = route.points[0], near = Math.hypot(R.x - p0.x, R.y - p0.y) < 0.5;
+      if (near) log('INFO', 'routes', '已在第 1 站附近，直接前往第 2 站');
+      routeLeg(route, near ? routeNext(route.points.length, loops, [0, 1, false]) : [0, 1, false], S.t, { loops, done:near ? 1 : 0 });
       return { ok:true };
     },
-    setPatrolPoint(k, p){ store.patrol[k] = p; log('INFO','patrol',`point ${k} set to (${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${deg(p.th).toFixed(0)}°)`);
-      if (task.type==='patrol'){ task.phase = 'plan'; task.planAt = S.t+.2; } },
-    cancel(){ if (task.type==='patrol') stopProfile('patrol'); cancelTask(); },
+    cancel(){ cancelTask(); },
     pause(on){ S.paused = on; log('INFO','bt_navigator', on ? 'Navigation paused' : 'Navigation resumed'); },
     arm(on){
       if (on){ store.armed = true; log('INFO','go2w_cmd_bridge','ARMED'); }
@@ -353,22 +396,20 @@ export function createMockSource(store, bus){
     releaseEstop(){ store.estop = false; log('INFO','go2w_cmd_bridge','E-STOP released (still LOCKED)'); },
     setParam(k, v){ store.params[k] = v; log('INFO','param',`ros2 param set /go2w_cmd_bridge ${{ vmax:'max_vx', wmax:'max_wz', tmo:'cmd_timeout' }[k]} ${v.toFixed(2)}`); },
     // mode = mapping | localization | navigation | null（全部停止）
-    setMode(mode){
+    setMode(mode, map){
+      if (map && map !== store.mapCurrent && store.maps.some(m => m.name === map)){ store.mapCurrent = map; store.maps.forEach(m => m.cur = m.name === map); }
       const cur = ['mapping','localization','navigation'].filter(m => store.profiles[m]!=='stop');
       const down = cur.filter(m => m!==mode);
       if (down.length){
         if (routeActive()) cancelTask('切换运行档位，已取消路线任务');
-        stopProfile('patrol');
       }
       down.forEach(stopProfile);
       if (mode && !cur.includes(mode)) startProfile(mode, down.length ? 900 : 0);
     },
     toggle(id){
       if (store.profiles[id]==='run') return stopProfile(id);
-      if (id==='patrol' && !run('navigation')){ cmd.setMode('navigation'); startProfile('patrol', 2400); return; }
       startProfile(id);
     },
-    startPatrol(){ run('patrol') ? startPatrol() : cmd.toggle('patrol'); },
     teleop(k){ if (k && task.type!=='idle') cancelTask('Goal canceled: manual teleop'); S.keys = k; },
     saveMap(name){ store.maps.unshift({ name, meta:`${GW}×${GH} · 0.05 m` }); log('INFO','slam_toolbox',`Saved map to data/maps/${name}`); },
     alignMap(source, name){

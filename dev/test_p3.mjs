@@ -22,17 +22,17 @@ const results = []; const ok = (name, cond, extra = '') => { results.push(`${con
 const c = client(); await c.open; await c.until(() => c.state && c.pose, 6000, '首个状态');
 const prof = k => c.state.profiles[k];
 const stamp = Date.now() % 100000;
-const A = { x: 0.01, y: 0, th: 0 }, B = { x: 0.61, y: -3.96, th: 1.57 };
+const A = { x: 0.01, y: 0, th: 0 }, B = { x: 3.06, y: -2.71, th: 1.57 };
 
 async function ensureNav(){
   if (prof('navigation') !== 'run'){ await c.cmd('set_mode', { mode: 'navigation' }); await c.until(() => prof('navigation') === 'run' && !c.state.busy, 12000, '导航起来'); }
   await sleep(600);
 }
 try {
-  await c.cmd('stop_patrol'); await ensureNav(); await c.cmd('arm', { on: false }); await c.cmd('initial_pose', A); await sleep(600);
+  await ensureNav(); await c.cmd('arm', { on: false }); await c.cmd('initial_pose', A); await sleep(600);
 
   // 1. 档位切换
-  await c.cmd('arm', { on: true }); await c.cmd('goal', { x: -6.34, y: -4.8, th: 0 });
+  await c.cmd('arm', { on: true }); await c.cmd('goal', { x: -1.44, y: 6.54, th: 0 });
   await c.until(() => c.state.armed === true && c.task?.status === 'active', 3000, '解锁并开始导航');
   let r = await c.cmd('set_mode', { mode: 'mapping' }); ok('导航 → 建图：接受', r.ok, r.msg);
   r = await c.cmd('set_mode', { mode: 'localization' }); ok('切换中拒绝再次切换', !r.ok, r.msg);
@@ -40,8 +40,9 @@ try {
   await c.until(() => c.state.armed !== true, 3000, '切换时上锁'); ok('切换时底盘上锁', true);
   await c.until(() => prof('mapping') === 'starting', 4000, '显示启动中'); ok('显示「启动中」', true);
   await c.until(() => prof('mapping') === 'run', 8000, '建图起来'); ok('建图运行中', prof('navigation') === 'stop');
-  ok('建图时没有 cmd_bridge', c.state.armed === null, `armed=${c.state.armed}`);
-  r = await c.cmd('arm', { on: true }); ok('建图时拒绝解锁', !r.ok, r.msg);
+  // 11-10 起建图 / 定位时后端会拉起遥控用速度桥（test_teleop_bridge.mjs 专门测）：建图时可以解锁遥控
+  await c.until(() => prof('bridge') === 'run', 8000, '建图时遥控速度桥起来'); ok('建图时有遥控速度桥', true);
+  r = await c.cmd('arm', { on: true }); ok('建图时可以解锁（遥控用）', r.ok, r.msg); await c.cmd('arm', { on: false });
   r = await c.cmd('goal', { ...B }); ok('建图时拒绝目标', !r.ok, r.msg);
   ok('切换时任务已结束', !c.task || c.task.status !== 'active', c.task?.status);
   r = await c.cmd('set_mode', { mode: 'bogus' }); ok('拒绝未知档位', !r.ok, r.msg);
@@ -96,7 +97,7 @@ try {
   await c.cmd('arm', { on: false }); await sleep(700);
   c.send({ t: 'teleop', v: 0.3, vy: 0, w: 0 }); await sleep(800);
   ok('上锁时遥控不动，并提示', Math.abs(c.pose.v) < 0.02 && c.toasts.length > 0, c.toasts.at(-1));
-  await c.cmd('arm', { on: true }); await c.cmd('goal', { x: -6.34, y: -4.8, th: 0 });
+  await c.cmd('arm', { on: true }); await c.cmd('goal', { x: -1.44, y: 6.54, th: 0 });
   await c.until(() => c.task?.status === 'active', 3000, '导航开始');
   await sleep(600);
   const hold = setInterval(() => c.send({ t: 'teleop', v: 0.3, vy: 0, w: 0 }), 100);
@@ -105,42 +106,9 @@ try {
   clearInterval(hold); const tRel = Date.now();
   await c.until(() => Math.abs(c.pose.v) < 0.03, 2000, '松手后停车'); ok('松手后停车', true, `${((Date.now()-tRel)/1000).toFixed(1)} s`);
   const fast = setInterval(() => c.send({ t: 'teleop', v: 5, vy: 0, w: 0 }), 100); await sleep(1500); clearInterval(fast);
-  ok('遥控速度被限幅', c.pose.v <= 0.55, `发 5 m/s，实际 ${c.pose.v}`);
+  ok('遥控速度被限幅', c.pose.v <= 1.05, `发 5 m/s，实际 ${c.pose.v}（TELEOP_MAX 11-09 起 1.0）`);
   await c.until(() => Math.abs(c.pose.v) < 0.03, 2000, '再次停车');
   await c.cmd('initial_pose', A); await sleep(600);
-
-  // 7. 巡逻
-  await c.cmd('arm', { on: false }); await sleep(500);
-  await c.until(() => c.state.patrol, 1000, 'patrol 状态');
-  r = await c.cmd('patrol_point', { k: 'C', x: 0, y: 0, th: 0 }); ok('拒绝未知巡逻点', !r.ok, r.msg);
-  r = await c.cmd('patrol_point', { k: 'A', ...A }); ok('设 A 点', r.ok, r.msg);
-  r = await c.cmd('patrol_point', { k: 'B', ...B }); ok('设 B 点', r.ok, r.msg);
-  r = await c.cmd('start_patrol', { loops: 1 }); ok('上锁时也能启动，提示等解锁', r.ok && /解锁/.test(r.msg), r.msg);
-  await c.until(() => prof('patrol') === 'run', 4000, 'patrol 运行');
-  await sleep(2500); ok('上锁时 patrol 不出发', Math.abs(c.pose.v) < 0.02 && !c.task);
-  r = await c.cmd('patrol_point', { k: 'A', ...B }); ok('巡逻中拒绝改点', !r.ok, r.msg);
-  r = await c.cmd('start_patrol', { loops: 1 }); ok('拒绝重复启动巡逻', !r.ok, r.msg);
-  r = await c.cmd('goal', { ...B }); ok('巡逻中拒绝单点目标', !r.ok, r.msg);
-  await c.cmd('arm', { on: true });
-  await c.until(() => c.task?.type === 'patrol' && c.task.status === 'active', 6000, '开始巡逻'); ok('任务卡片显示巡逻', true, `去 ${c.task.leg}`);
-  await c.until(() => c.task?.type === 'patrol' && c.task.legs >= 1, 20000, '完成第一段');
-  await c.until(() => c.task?.leg === 'B' && c.task.remaining > 1, 15000, '去 B 且有进度'); ok('外部目标也有进度', true, `剩 ${c.task.remaining.toFixed(1)} m`);
-  await c.until(() => c.task?.legs >= 2, 40000, '到 B');
-  await c.until(() => prof('patrol') === 'stop', 45000, '巡逻完成退出'); ok('往返 1 次后结束（A→B→A）', c.logs.some(l => l.includes('巡逻完成')));
-  ok('结束后任务空闲', !c.task, JSON.stringify(c.task));
-
-  // 巡逻中取消：不能被 patrol.py 重试带着又走起来
-  await c.cmd('start_patrol', { loops: 0 });
-  await c.until(() => c.task?.type === 'patrol' && c.task.legs >= 0 && c.task.remaining != null, 15000, '巡逻走起来');
-  r = await c.cmd('cancel'); ok('巡逻中取消', r.ok, r.msg);
-  await c.until(() => prof('patrol') === 'stop', 4000, '巡逻被停'); await sleep(4500);
-  ok('取消后不会重试', Math.abs(c.pose.v) < 0.02 && !c.task && prof('patrol') === 'stop', `v=${c.pose.v}`);
-
-  // 巡逻中上锁 → patrol 自己结束
-  await c.cmd('start_patrol', { loops: 0 });
-  await c.until(() => c.task?.type === 'patrol', 12000, '巡逻开始');
-  await c.cmd('arm', { on: false });
-  await c.until(() => prof('patrol') === 'stop', 5000, '上锁后巡逻结束'); ok('上锁后巡逻结束', true);
 
   await c.cmd('initial_pose', A);
 } catch (e) { results.push('FAIL  ' + e.message); }

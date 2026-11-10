@@ -31,6 +31,7 @@ import asyncio
 import json
 import math
 import os
+import shutil
 import struct
 import tempfile
 import threading
@@ -48,7 +49,7 @@ from aiohttp import WSMsgType, web
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
 from nav2_msgs.msg import BehaviorTreeLog, ParticleCloud
-from nav2_msgs.srv import LoadMap
+from nav2_msgs.srv import ClearCostmapExceptRegion, LoadMap
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rcl_interfaces.msg import Log, Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
@@ -62,10 +63,12 @@ from rosidl_runtime_py.utilities import get_message
 from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 
+import camera as C
 import procs as P
 
 # 二进制帧类型。代价地图 / 点云 / 粒子较重，只发给打开了对应图层的网页
 T_MAP, T_SCAN, T_GCOST, T_LCOST, T_CLOUD, T_PART = 1, 2, 3, 4, 5, 6
+T_CAM = 7   # 摄像头一帧 H.264（Annex-B），只发给正在看的那一个网页
 HEAVY = {'gcost': T_GCOST, 'lcost': T_LCOST, 'cloud': T_CLOUD, 'particles': T_PART}
 # 点云：离地高度范围（和 pcl2scan 一致）、最远距离、俯视体素、每帧最多点数、最高频率
 CLOUD_Z, CLOUD_RANGE, CLOUD_VOXEL, CLOUD_MAX, CLOUD_DT = (0.30, 1.60), 12.0, 0.05, 4000, 0.2
@@ -74,21 +77,44 @@ PLAN_MAX = 500
 ROSOUT_PER_S = 30   # /rosout 转发限流（条 / 秒）
 # 仓库的 data/（容器里是 /go2w/data）；本地调试时 run.sh 指向一份副本，免得写坏真实数据
 DATA = os.environ.get('GO2W_DATA') or os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data'))
+# 录包上传到常驻服务器 166:~/go2w_bags。密钥在 data/ssh（不随 sync.sh 同步）；166 上这把钥匙被 rrsync 限制成只能往 go2w_bags 写
+UPLOAD_DEST = os.environ.get('GO2W_UPLOAD_DEST', 'evoengine@192.168.1.166:')
+UPLOAD_LABEL = os.environ.get('GO2W_UPLOAD_LABEL', '166:~/go2w_bags')
+# 录包容量上限：data/bags 总量超过 BAG_LIMIT_GB，或磁盘剩余不到 BAG_MIN_FREE_GB，就从最旧的开始删「已上传到 166」的包；
+# 没上传的不自动删，只报警并拒绝开始新的录包；正在录的包自己就超过上限（或磁盘快满）时自动停止录包
+BAG_LIMIT_GB = float(os.environ.get('GO2W_BAG_LIMIT_GB', '100'))
+BAG_MIN_FREE_GB = float(os.environ.get('GO2W_BAG_MIN_FREE_GB', '10'))
+ROLLBACK_SECONDS = 20         # 回溯录制的长度
+ROLLBACK_RETRY = 30.0         # 回溯进程退出后，隔多久再拉起来
+ROLLBACK_SAVE_TIMEOUT = 20.0  # 等存包完成的最长时间
 # 档位进程起来后，看到这些节点才算「运行中」
 MODE_NODES = {'mapping': ('slam_toolbox',), 'localization': ('amcl',), 'navigation': ('bt_navigator', 'go2w_cmd_bridge')}
 START_TIMEOUT = 90.0
+BRIDGE_RETRY = 10.0   # 遥控速度桥退出后，隔这么久再重启
 # 键盘遥控限速（网页按键给的速度再被这里夹一次，cmd_bridge 还会再限一次）
-TELEOP_MAX = (0.5, 0.2, 1.0)
+TELEOP_MAX = (1.0, 0.2, 1.2)
 TELEOP_TIMEOUT = 0.3
 INSPECT_DT = 0.5    # topic 查看器每条 topic 最多 2 Hz 刷新
 ROS_LEVEL = {20: 'INFO', 30: 'WARN', 40: 'ERROR', 50: 'ERROR'}
 BASE_FRAME = 'base_footprint'
 STALE = 3.0  # 秒；超过这么久没收到就当没有
+# 路线启动时离第 1 站不到这么远，就当已在第 1 站、直接去第 2 站：这么短的路径 RotationShim 不会先转正
+# （forward_sampling_distance 0.5），MPPI 只给出很小的速度，Go2W 不执行，会一直卡住
+ROUTE_NEAR_START = 0.5
+# 多点任务：Nav2 报未到达（差几厘米到 goal checker 0.15 m 判不过、收尾蹭不进去）时，
+# 机器人离该站不超过这么远就当作到了，继续下一站；更远才终止任务
+ROUTE_ARRIVE_TOL = 0.4
+# 地图显示方向（只转网页画面，不改地图坐标）：按地图名存在 data/map_views.json，大家看到的方向一样。
+# 建图时还没有地图名，用 MAPPING_VIEW 暂存，存图时带给新地图
+MAPPING_VIEW = '_mapping'
 BRIDGE = '/go2w_cmd_bridge'
 # 网页上的滑条 → cmd_bridge 参数（都是 double）
 PARAMS = {'vmax': 'max_vx', 'wmax': 'max_wz', 'tmo': 'cmd_timeout'}
 # 和 RViz 2D Pose Estimate 相同的初始协方差
+COSTMAP_REFILL = 1.5   # s：清完代价地图后等障碍层按当前点云重新标记（全局 1 Hz 更新）
 INIT_COV_XY, INIT_COV_YAW = 0.25, 0.06853891945200942
+# 重定位微调（网页「应用到 AMCL」）：用户已经对准了，σ 取 5 cm / 2°，粒子不撒开
+FINE_COV_XY, FINE_COV_YAW = 0.05 ** 2, math.radians(2) ** 2
 # 行为树里表示「在做恢复」的节点
 RECOVERY_NODES = ('Spin', 'BackUp', 'Wait', 'DriveOnHeading')
 ACTIVE = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING, GoalStatus.STATUS_CANCELING)
@@ -253,7 +279,6 @@ class Bridge(Node):
 
         # P3
         self.fb_any = {}         # 所有目标的反馈（含 RViz、patrol 发的）：uuid → (剩余距离, 用时, 恢复次数)
-        self.patrol = {'A': None, 'B': None, 'loops': 0, 'target': None, 'legs': 0, 'state': None}
         self.map_current = None  # map_server 正在用的地图名（读它的 yaml_filename 参数）
         self.inspect = {}        # topic → {'sub', 'text', 't', 'ver', 'rate'}；只在有网页查看时订阅
         self.ros_ops = deque()   # 要在 rclpy 线程里做的事（建 / 删订阅），由定时器执行
@@ -262,6 +287,7 @@ class Bridge(Node):
         self.map_blob, self.map_ver = None, 0
         self.near_occ = None     # 地图障碍物膨胀 MATCH_TOL 后的布尔栅格，算匹配率用
         self.map_info = None
+        self.map_loaded = None   # 网页「切换地图」最近加载的地图名（map_server 重启后作废）
         self.amcl = None         # (位置 σ m, 航向 σ °, 收到时间)
         self.match = None        # scan / map 匹配率 %，平滑过
         self.scan_blob, self.scan_ver = None, 0
@@ -299,7 +325,6 @@ class Bridge(Node):
         # 所有 navigate_to_pose 目标的反馈（RViz、patrol 发的也有），任务卡片显示外部目标的进度用
         self.create_subscription(NavigateToPose.Impl.FeedbackMessage, '/navigate_to_pose/_action/feedback', self.on_any_feedback, 10)
 
-        self.patrol_pub = self.create_publisher(PoseStamped, '/patrol_pose', 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.loadmap_cli = self.create_client(LoadMap, '/map_server/load_map')
         self.mapparam_cli = self.create_client(GetParameters, '/map_server/get_parameters')
@@ -311,6 +336,13 @@ class Bridge(Node):
         self.arm_cli = self.create_client(SetBool, f'{BRIDGE}/arm')
         self.pget_cli = self.create_client(GetParameters, f'{BRIDGE}/get_parameters')
         self.pset_cli = self.create_client(SetParameters, f'{BRIDGE}/set_parameters')
+        # 出发前清代价地图：MID360 往下只看到约 7°，机器人身边贴地的一圈是盲区，人站过留下的障碍标记清不掉，
+        # 起点落在障碍里 Nav2 就报「Either of the start or goal pose are an obstacle」（11-06 实测）
+        # 11-09：clear_entirely 会把整张代价地图（含静态地图层）重置成「未知」，等下一轮更新才填回；
+        # Theta* 不许走未知区后，清完 1.5 s 规划常报起点/终点是障碍。改用 clear_except（reset_distance 0 =
+        # 全部清掉）：只清雷达障碍层（clearable_layers 默认含 voxel_layer），静态地图不动
+        self.clear_clis = [self.create_client(ClearCostmapExceptRegion, f'/{c}/clear_except_{c}')
+                           for c in ('global_costmap', 'local_costmap')]
 
     def event(self, level, msg):
         """记日志并推给网页。不会抛异常：停车等安全动作不能因为打日志失败而中断。
@@ -474,8 +506,6 @@ class Bridge(Node):
         lv = ROS_LEVEL.get(level)
         if lv is None or m.name == 'go2w_web':   # DEBUG 不转；本节点的事件已经单独推送
             return
-        if m.name == 'go2w_patrol':
-            self.track_patrol(lv, m.msg)
         now = time.monotonic()
         if now - self.rosout_t >= 1.0:
             if self.rosout_dropped:
@@ -488,23 +518,6 @@ class Bridge(Node):
         self.events.append((lv, m.name, m.msg))
 
     # ---------- P3 ----------
-    def track_patrol(self, lv, text):
-        """patrol.py 没有状态 topic，按它的日志跟踪进度（文案见 scripts/patrol.py）。"""
-        p = self.patrol
-        if text.startswith('→ 去 '):
-            p['target'], p['state'] = text[4], 'running'
-        elif text.startswith('到达 ') and '第 ' in text:
-            try:
-                p['legs'] = int(text.split('第 ')[1].split(' ')[0])
-            except (IndexError, ValueError):
-                pass
-        elif text.startswith('巡逻完成'):
-            p['state'] = 'done'
-        elif text.startswith('开始巡逻'):
-            p['state'], p['legs'] = 'running', 0
-        elif lv == 'ERROR':
-            p['state'] = 'error'
-
     def on_any_feedback(self, msg):
         fb = msg.feedback
         self.fb_any[bytes(msg.goal_id.uuid)] = (fb.distance_remaining, secs(fb.navigation_time), fb.number_of_recoveries,
@@ -547,14 +560,6 @@ class Bridge(Node):
         rec['text'] = text if len(text) < 8000 else text[:8000] + '\n…（太长，已截断）'
         rec['ver'] += 1
 
-    def publish_patrol_point(self, x, y, th):
-        m = PoseStamped()
-        m.header.frame_id = 'map'
-        m.header.stamp = self.get_clock().now().to_msg()
-        m.pose.position.x, m.pose.position.y = float(x), float(y)
-        m.pose.orientation.z, m.pose.orientation.w = math.sin(th / 2), math.cos(th / 2)
-        self.patrol_pub.publish(m)
-
     def publish_cmd(self, v, vy, w):
         t = Twist()
         t.linear.x, t.linear.y, t.angular.z = float(v), float(vy), float(w)
@@ -567,7 +572,7 @@ class Bridge(Node):
 
     def fetch_map_current(self):
         if not self.mapparam_cli.service_is_ready():
-            self.map_current = None
+            self.map_current = self.map_loaded = None
             return
         req = GetParameters.Request()
         req.names = ['yaml_filename']
@@ -575,10 +580,27 @@ class Bridge(Node):
         def done(fut):
             try:
                 v = fut.result().values[0].string_value
-                self.map_current = os.path.basename(v)[:-5] if v.endswith('.yaml') else (v or None)
+                param = os.path.basename(v)[:-5] if v.endswith('.yaml') else (v or None)
+                self.map_current = self.match_map(param)
             except Exception:
                 pass
         self.mapparam_cli.call_async(req).add_done_callback(done)
+
+    def match_map(self, param):
+        """现在用的是哪张地图。map_server 的 yaml_filename 参数只反映启动时的地图：
+        用 load_map 服务（网页「切换地图」）换图后它不会变（11-06 实测），所以以实际发出的 /map 为准，
+        和 data/maps 里的文件比尺寸、原点、分辨率。内容一样分不出来时，优先网页加载的那张，再是参数。"""
+        info = self.map_info
+        if not info:
+            return param
+        res, ox, oy, w, h = info
+        hits = [m['name'] for m in P.list_maps(os.path.join(DATA, 'maps'))
+                if m['w'] == w and m['h'] == h and m['ox'] is not None
+                and abs(m['res'] - res) < 1e-6 and abs(m['ox'] - ox) < 1e-3 and abs(m['oy'] - oy) < 1e-3]
+        for name in (self.map_loaded, param):
+            if name and name in hits:
+                return name
+        return hits[0] if len(hits) == 1 else param
 
     def on_odom(self, m):
         self.rates['/odom'].tick()
@@ -654,15 +676,15 @@ class Bridge(Node):
                 self.params[key] = float(v.integer_value)
 
     # ---------- 指令（asyncio 线程调用；返回 rclpy future） ----------
-    def publish_initial_pose(self, x, y, th):
+    def publish_initial_pose(self, x, y, th, fine=False):
         m = PoseWithCovarianceStamped()
         m.header.frame_id = 'map'
         m.header.stamp = self.get_clock().now().to_msg()
         m.pose.pose.position.x, m.pose.pose.position.y = float(x), float(y)
         m.pose.pose.orientation.z, m.pose.pose.orientation.w = math.sin(th / 2), math.cos(th / 2)
         cov = [0.0] * 36
-        cov[0] = cov[7] = INIT_COV_XY
-        cov[35] = INIT_COV_YAW
+        cov[0] = cov[7] = FINE_COV_XY if fine else INIT_COV_XY
+        cov[35] = FINE_COV_YAW if fine else INIT_COV_YAW
         m.pose.covariance = cov
         self.initpose_pub.publish(m)
 
@@ -699,6 +721,11 @@ class Bridge(Node):
     def cancel_all(self):
         """取消所有 navigate_to_pose 目标（零 uuid + 零时间戳 = 全部），包括 RViz、patrol 发的。"""
         return self.cancel_cli.call_async(CancelGoal.Request())
+
+    def clear_costmaps(self):
+        """清空全局、局部代价地图（障碍层清空后按当前点云重新标记），返回各个服务的 future。"""
+        return [c.call_async(ClearCostmapExceptRegion.Request(reset_distance=0.0))
+                for c in self.clear_clis if c.service_is_ready()]
 
     def call_arm(self, on):
         req = SetBool.Request()
@@ -792,22 +819,13 @@ class Bridge(Node):
                     'remaining': g['remaining'], 'total': g['total'], 'eta': g['eta'],
                     'elapsed': g['nav_time'] if g['nav_time'] is not None else time.monotonic() - g['t0'],
                     'recoveries': g['recoveries']}
-        p = self.patrol
-        patrolling = p['state'] == 'running'
-        if foreign or patrolling:
-            # 别处发的目标没有我们自己的 action 句柄，进度来自 /navigate_to_pose/_action/feedback
-            fb = self.fb_any.get(foreign[0]) if foreign else None
+        if foreign:
+            # 别处（RViz、命令行的 patrol.py）发的目标没有我们自己的 action 句柄，进度来自 /navigate_to_pose/_action/feedback
+            fb = self.fb_any.get(foreign[0])
             fresh = fb and time.monotonic() - fb[4] < 3.0
-            t = {'status': 'active', 'phase': phase if foreign else 'arrived',
-                 'remaining': fb[0] if fresh else None, 'elapsed': fb[1] if fresh else None,
-                 'recoveries': fb[2] if fresh else 0, 'eta': fb[3] if fresh else None, 'total': None}
-            if patrolling:
-                tgt = p[p['target']] if p['target'] in ('A', 'B') else None
-                t.update(type='patrol', leg=p['target'], legs=p['legs'], loops=p['loops'],
-                         goal={'x': tgt[0], 'y': tgt[1], 'th': tgt[2]} if tgt else None)
-            else:
-                t['type'] = 'external'
-            return t
+            return {'type': 'external', 'status': 'active', 'phase': phase,
+                    'remaining': fb[0] if fresh else None, 'elapsed': fb[1] if fresh else None,
+                    'recoveries': fb[2] if fresh else 0, 'eta': fb[3] if fresh else None, 'total': None}
         return None
 
     def state(self, sys_stats, procs_status=None, transitions=None):
@@ -834,7 +852,6 @@ class Bridge(Node):
             'hasMap': self.map_blob is not None,
             'params': dict(self.params),
             'loc': self.loc_quality(),
-            'patrol': {k: self.patrol[k] for k in ('A', 'B', 'loops', 'state')},
             'mapCurrent': self.map_current,
             'sys': sys_stats,
         }
@@ -863,12 +880,13 @@ class Bridge(Node):
             else:
                 st = procs_status.get(m, False)
             profiles[m] = ('run' if nodes_up or procs_status is None else 'starting') if st else 'stop'
+        # 网页不再启动巡逻；命令行（nav.sh）启动的 patrol.py 仍要识别：取消 / 急停 / 切档位时连它一起停
         profiles['patrol'] = 'run' if 'go2w_patrol' in names or (procs_status or {}).get('patrol') else 'stop'
         profiles['bag'] = 'run' if any(n.startswith('rosbag2_recorder') for n in names) or (procs_status or {}).get('bag') else 'stop'
+        # 遥控用的独立速度桥（不开导航时）：进程在 + 节点在才算能用
+        profiles['bridge'] = 'run' if (procs_status or {}).get('bridge') and 'go2w_cmd_bridge' in names else 'stop'
         for k, v in (transitions or {}).items():   # 网页刚发起的启停，进程状态还没跟上
             profiles[k] = v
-        if profiles['patrol'] == 'stop' and self.patrol['state'] == 'running':
-            self.patrol['state'] = None             # patrol.py 被停掉时不会打「巡逻完成」
         return profiles
 
 
@@ -880,6 +898,7 @@ class Server:
         self.estop, self.estop_t = False, 0.0
         self.pending = set()
         node.wants = self.wants   # 点云、粒子没人看就不算，省扩展坞的 CPU
+        self.camera = C.Camera(pack, T_CAM, node.event)
         self.sys = SysStats()
         # P3：进程管理。本地调试（GO2W_FAKE_PROCS=1）换成假模拟器里的进程
         self.simulated = bool(os.environ.get('GO2W_FAKE_PROCS'))
@@ -891,12 +910,28 @@ class Server:
         self.procs_status = None      # 最近一次进程检查结果；None = 查不到（没有 docker.sock）
         self.transitions = {}         # 网页发起、还没完成的启停：档位 → 'starting' / 'stopping'
         self.starting = {}            # 档位 → 开始启动的时间（启动超时 / 失败检测）
+        self.bridge_t, self.bridge_started = -1e9, False   # 遥控用独立速度桥：上次启动时间、是否由网页启动过
         self.busy = False             # 同一时间只做一个启停操作
         self.map_choice = None        # 没有定位 / 导航在跑时，网页选好的「下次启动用的地图」
         self.map_busy = False         # 保存和导出地图期间保护源快照及目标文件
         self.teleop = None            # (vx, vy, wz, 收到时间)；None = 没有在遥控
         self.maps = P.list_maps(os.path.join(DATA, 'maps'))
         self.bags = P.list_bags(os.path.join(DATA, 'bags'))
+        self.rollback_file = os.path.join(DATA, 'rollback.json')
+        self.rollback_on, self.rollback_t, self.rollback_started, self.rollback_saving = True, 0.0, False, False
+        self.quota_warned = False     # 超限又删不动时只报一次警，回到上限以下再复位
+        try:
+            with open(self.rollback_file) as f:
+                self.rollback_on = bool(json.load(f).get('on', True))
+        except (OSError, ValueError, AttributeError):
+            pass
+        self.uploads_file = os.path.join(DATA, 'bag_uploads.json')
+        self.uploads = {}             # 包名 → {state: run/done/fail, pct, msg}；done 的存进 bag_uploads.json
+        try:
+            with open(self.uploads_file) as f:
+                self.uploads = {k: {'state': 'done', 'pct': 100, 'msg': v} for k, v in json.load(f).items()}
+        except (OSError, ValueError, AttributeError):
+            pass
         self.routes_file = os.path.join(DATA, 'routes.json')
         self.routes = {}
         self.routes_error = False
@@ -912,6 +947,16 @@ class Server:
         self.route = None
         self.route_job = None
         self.goal_pending = False
+        self.views_file = os.path.join(DATA, 'map_views.json')
+        self.map_views = {}
+        try:
+            with open(self.views_file, encoding='utf-8') as f:
+                raw = json.load(f)
+            self.map_views = {k: self.view_angle(v) for k, v in raw.items() if isinstance(k, str) and P.SAFE_NAME.fullmatch(k)}
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            node.event('WARN', f'无法读取地图显示方向 {self.views_file}，全部按 0° 显示：{e}')
         self.map_loading = False
         self.checking_route = False
 
@@ -988,9 +1033,9 @@ class Server:
             return False, '地图正在保存或对齐，请稍等'
         if ws.closed or ws not in self.clients:
             return False, '网页已断开'
-        if self.checking_route and op in ('goal', 'initial_pose', 'start_patrol', 'route_start'):
+        if self.checking_route and op in ('goal', 'initial_pose', 'route_start'):
             return False, '正在检查路线，请稍等'
-        if self.route_running() and (op in ('goal', 'initial_pose', 'start_patrol')
+        if self.route_running() and (op in ('goal', 'initial_pose')
                                      or (op == 'arm' and d.get('on'))):
             return False, '多点任务进行中：请先取消任务'
         if op in ('goal', 'arm', 'cancel', 'estop'):
@@ -1008,19 +1053,27 @@ class Server:
             if op == 'initial_pose':
                 if 'amcl' not in n.get_node_names():
                     return False, '定位（AMCL）没有运行，无法设置初始位姿'
-                n.publish_initial_pose(d['x'], d['y'], d['th'])
-                n.event('INFO', f"初始位姿 ({d['x']:.2f}, {d['y']:.2f}, {math.degrees(d['th']):.0f}°)")
-                return True, '初始位姿已发布'
+                fine = d.get('cov') == 'fine'
+                n.publish_initial_pose(d['x'], d['y'], d['th'], fine)
+                n.event('INFO', f"{'重定位微调' if fine else '初始位姿'} ({d['x']:.2f}, {d['y']:.2f}, {math.degrees(d['th']):.1f}°)（{self.remote(ws)}）")
+                # 11-09：定位错误期间（启动时 AMCL 默认在地图原点）雷达标的障碍会落在错误位置，
+                # 机器人脚下的盲区又擦不掉 → 规划报「起点在障碍物里」。改位姿后清一次代价地图
+                asyncio.ensure_future(self.clear_after_pose())
+                return True, '位置已修正' if fine else '初始位姿已发布'
             if op == 'goal':
                 if self.estop:
                     return False, '急停中：先解除急停'
                 if self.prof('patrol') != 'stop':
-                    return False, '巡逻进行中：先停止巡逻再发目标'
+                    return False, '命令行启动的 patrol.py 在运行：先取消导航（会连巡逻一起停）'
                 if not n.nav.server_is_ready():
                     return False, 'Nav2 没有运行（navigate_to_pose 不可用）'
                 if self.goal_pending:
                     return False, '正在发送导航目标'
                 self.route = None
+                # 结束的旧目标（卡片会保留 5 s）先清掉：等 Nav2 接受新目标时，卡片不能显示旧目标的「已取消 / 失败」
+                with n.lock:
+                    if n.goal and n.goal['status'] != 'active':
+                        n.goal = None
                 self.goal_pending = True
                 try:
                     h = await self.aw(n.send_goal(d['x'], d['y'], d['th']), 3.0)
@@ -1055,7 +1108,7 @@ class Server:
                     errors = await self.disarm_and_cancel('底盘上锁')
                     return (False, '；'.join(errors)) if errors else (True, '底盘已上锁，任务已取消')
                 if not n.arm_cli.service_is_ready():
-                    return False, 'cmd_bridge 没有运行（导航没启动？）'
+                    return False, '速度桥没有运行（刚开机或刚切换档位时要等几秒）'
                 r = await self.aw(n.call_arm(on), 2.0)
                 if r.success:
                     n.armed, n.armed_t = on, time.monotonic()
@@ -1084,40 +1137,23 @@ class Server:
             if op == 'route_check':
                 return await self.check_route(ws, d)
             if op == 'route_start':
-                return self.start_route(ws, d.get('route_id'))
-            if op == 'patrol_point':
-                k = d.get('k')
-                if k not in ('A', 'B'):
-                    return False, '巡逻点只能是 A 或 B'
-                if self.prof('patrol') != 'stop':
-                    return False, '巡逻进行中：patrol.py 不接受新点，先停止巡逻再改'
-                n.patrol[k] = (float(d['x']), float(d['y']), float(d['th']))
-                return True, f'巡逻点 {k} 已设置'
-            if op == 'start_patrol':
-                self.owner = ws
-                return await self.start_patrol(int(d.get('loops', 0)))
-            if op == 'stop_patrol':
-                self.transitions['patrol'] = 'stopping'
-                try:
-                    await self.procs.stop_patrol()
-                    await asyncio.sleep(0.5)      # patrol.py 要先取消目标再退出
-                    await self.refresh_procs()
-                finally:
-                    self.transitions.pop('patrol', None)
-                n.event('INFO', '已停止巡逻')
-                return True, '已停止巡逻（patrol.py 会取消当前导航目标）'
+                return await self.start_route_armed(ws, d)
             if op == 'bag_start':
                 return await self.bag_start(d.get('name'), d.get('topics') or [])
+            if op == 'bag_delete':
+                return await self.bag_delete(d.get('name'), self.remote(ws))
+            if op == 'rollback_set':
+                return self.rollback_set(bool(d.get('on')), self.remote(ws))
+            if op == 'rollback_save':
+                return await self.rollback_save(self.remote(ws))
+            if op == 'bag_upload':
+                return await self.bag_upload(d.get('name'), self.remote(ws))
             if op == 'bag_stop':
-                self.transitions['bag'] = 'stopping'
-                try:
-                    await self.procs.stop_bag()
-                    await self.refresh_procs()
-                    self.bags = P.list_bags(os.path.join(DATA, 'bags'))
-                finally:
-                    self.transitions.pop('bag', None)
+                await self.bag_stop()
                 n.event('INFO', '录包已停止')
                 return True, '录包已停止'
+            if op == 'map_view':
+                return await self.set_view(d.get('map'), d.get('angle'))
             if op == 'save_map':
                 return await self.save_map(d.get('name', ''))
             if op == 'align_map':
@@ -1131,6 +1167,23 @@ class Server:
             return False, f'指令格式不对：{e!r}'
 
     # ---------- 多点导航 ----------
+    @staticmethod
+    def route_next(n, loops, state):
+        """循环路线的下一站：state = (站序号, 第几圈, 是否在回起点)，返回 None 表示走完。
+        单程（loops = None）：0 → n-1。循环：0 → … → n-1 → 0 算一圈（终点直接回起点，不原路返回），
+        下一圈从 1 出发；loops = 0 表示一直循环。"""
+        i, loop, back = state
+        if back:                          # 刚回到起点：这一圈走完
+            return (1, loop + 1, False) if loops == 0 or loop < loops else None
+        if i < n - 1:
+            return i + 1, loop, False
+        return (0, loop, True) if loops is not None else None
+
+    @staticmethod
+    def route_pose(points, i, back):
+        """回到起点时也按 1 号点自己的朝向停（自动朝向 = 面向 2 号点），下一圈出发前不用再转。"""
+        return points[i]
+
     @staticmethod
     def route_record(d, route_id):
         name, map_name, points = d['name'], d['map'], d['points']
@@ -1192,6 +1245,49 @@ class Server:
             if tmp and os.path.exists(tmp):
                 os.unlink(tmp)
         self.routes = routes
+
+    @staticmethod
+    def view_angle(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError('角度必须是有限的数字')
+        a = math.remainder(float(v), 2 * math.pi)     # 归到 [-π, π]
+        return round(a, 6)
+
+    def write_views(self, views):
+        os.makedirs(DATA, exist_ok=True)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=DATA, delete=False) as f:
+                tmp = f.name
+                json.dump(views, f, ensure_ascii=False, indent=2, sort_keys=True)
+            os.replace(tmp, self.views_file)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+        self.map_views = views
+
+    def views_message(self):
+        return json.dumps({'t': 'map_views', 'items': self.map_views})
+
+    async def set_view(self, name, angle):
+        if not isinstance(name, str) or not P.SAFE_NAME.fullmatch(name):
+            return False, '地图名只能用字母、数字、下划线和减号'
+        try:
+            a = self.view_angle(angle)
+        except ValueError as e:
+            return False, str(e)
+        views = dict(self.map_views)
+        if abs(a) < 1e-6:
+            views.pop(name, None)
+        else:
+            views[name] = a
+        if views != self.map_views:
+            try:
+                self.write_views(views)
+            except OSError as e:
+                return False, f'保存显示方向失败：{e}'
+            await self.send_all(self.views_message())
+        return True, ''
 
     def routes_message(self):
         return json.dumps({'t': 'routes', 'items': list(self.routes.values())})
@@ -1278,10 +1374,12 @@ class Server:
         finally:
             self.checking_route = False
 
-    def start_route(self, ws, route_id):
+    def start_route(self, ws, route_id, round_trip=False, loops=1):
         route = self.routes.get(route_id)
         if route is None:
             return False, '找不到这个导航任务'
+        if type(round_trip) is not bool or type(loops) is not int or not 0 <= loops <= 1000:
+            return False, '循环圈数需要是 0–1000 的整数（0 = 一直循环）'
         if (self.route_running() or self.goal_pending or self.node.nav_active()
                 or self.prof('patrol') != 'stop' or self.teleop is not None):
             return False, '请先结束当前导航、巡逻或遥控'
@@ -1289,10 +1387,40 @@ class Server:
         if reason:
             return False, reason
         self.owner = ws
+        n = len(route['points'])
         self.route = {'record': route, 'index': 0, 'status': 'active', 'started': time.monotonic(),
-                      'message': '', 'stop': asyncio.Event(), 'goal': None, 'checking': True}
+                      'message': '', 'stop': asyncio.Event(), 'goal': None, 'checking': True,
+                      # 循环：loops 为 None 表示单程；done = 已到达的站数，用来算进度。一圈到 n 站（含回到起点）
+                      'loops': loops if round_trip else None, 'loop': 1, 'back': False, 'done': 0,
+                      'total': n if not round_trip else None if loops == 0 else 1 + loops * n,
+                      'target': route['points'][0]}
         self.route_job = asyncio.create_task(self.run_route(ws, self.route))
-        return True, f"开始任务：{route['name']}"
+        how = '' if not round_trip else '，一直循环' if loops == 0 else f'，循环 {loops} 圈'
+        return True, f"开始任务：{route['name']}{how}"
+
+    async def start_route_armed(self, ws, d):
+        """网页「启动导航」确认框：arm=true 时先解锁再出发；出发失败就把刚解的锁再上回去。"""
+        n, armed_here = self.node, False
+        if d.get('arm') and not n.is_armed():
+            if self.estop:
+                return False, '急停中：先解除急停'
+            if self.prof('navigation') != 'run' or not n.arm_cli.service_is_ready():
+                return False, '导航没有运行（cmd_bridge 不可用），无法解锁'
+            self.owner = ws          # 先认控制方：解锁后这个网页断线会自动上锁
+            r = await self.aw(n.call_arm(True), 2.0)
+            n.event('WARN' if r.success else 'ERROR', f"启动任务前自动解锁：{r.message}（{self.remote(ws)}）")
+            if not r.success:
+                return False, f'解锁失败：{r.message}'
+            n.armed, n.armed_t, armed_here = True, time.monotonic(), True
+        result = self.start_route(ws, d.get('route_id'), d.get('round_trip', False), d.get('loops', 1))
+        if armed_here and not result[0]:
+            try:
+                r = await self.aw(n.call_arm(False), 2.0)
+                if r.success:
+                    n.armed, n.armed_t = False, time.monotonic()
+            except Exception as e:
+                n.event('ERROR', f'任务没有启动，重新上锁失败：{e}')
+        return result
 
     def finish_route(self, route, status, message):
         route.update(status=status, message=message, ended=time.monotonic())
@@ -1303,26 +1431,76 @@ class Server:
         if self.route and self.route['status'] == 'active':
             self.finish_route(self.route, 'canceled', reason)
 
+    async def clear_after_pose(self):
+        """设置初始位姿后清代价地图：先等 AMCL 用新位姿更新 map→odom，再清，重新标记时障碍就落在对的位置。"""
+        n = self.node
+        await asyncio.sleep(0.5)
+        futs = n.clear_costmaps()
+        if not futs:
+            return
+        try:
+            await asyncio.gather(*(self.aw(f, 2.0) for f in futs))
+            n.event('INFO', '位姿已更新，已清除代价地图里的旧障碍标记')
+        except Exception as e:
+            n.event('WARN', f'设置位姿后清除代价地图没有完成：{e!r}')
+
+    async def clear_before_start(self):
+        """出发前清代价地图，再等一下让障碍层按当前点云重新标记。清不了只记日志，不拦着出发。"""
+        n = self.node
+        futs = n.clear_costmaps()
+        if not futs:
+            n.event('WARN', '代价地图清除服务不可用，没有清除旧的障碍标记')
+            return
+        try:
+            await asyncio.gather(*(self.aw(f, 2.0) for f in futs))
+        except Exception as e:
+            n.event('WARN', f'清除代价地图没有完成：{e!r}')
+            return
+        await asyncio.sleep(COSTMAP_REFILL)
+        n.event('INFO', '出发前已清除代价地图里的旧障碍标记')
+
     async def run_route(self, ws, route):
         n, record = self.node, route['record']
         try:
+            await self.clear_before_start()
+            if route['stop'].is_set():
+                return
             pos = n.lookup(BASE_FRAME)
             if not pos or n.fixed != 'map':
                 raise RuntimeError('无法读取当前位置')
             start = dict(zip(('x', 'y', 'th'), pos))
-            _, failed, reason = await self.plan_route(record, start, lambda: route['stop'].is_set() or n.nav_active())
+            points, loops = record['points'], route['loops']
+            first = (0, 1, False)
+            near = math.hypot(start['x'] - points[0]['x'], start['y'] - points[0]['y'])
+            if near < ROUTE_NEAR_START:
+                first = self.route_next(len(points), loops, first)
+                route['done'] = 1
+                n.event('INFO', f'已在第 1 站附近（{near:.2f} m），直接前往第 2 站')
+            # 出发前检查一整圈（循环时含终点回起点那一段，后面几圈走的是同样的路段）
+            order, state = [], first
+            while state and state[1] == 1:
+                order.append(state)
+                state = self.route_next(len(points), loops, state)
+            check = {**record, 'points': [self.route_pose(points, i, back) for i, _, back in order]}
+            _, failed, reason = await self.plan_route(check, start, lambda: route['stop'].is_set() or n.nav_active())
             if route['stop'].is_set():
                 return
             if failed is not None:
-                route['index'] = failed - 1
-                leg = '当前位置 → 第 1 站' if failed == 1 else f'第 {failed - 1} → {failed} 站'
+                route['index'] = order[failed - 1][0]
+                to = order[failed - 1][0] + 1
+                leg = f'当前位置 → 第 {to} 站' if failed == 1 else f'第 {order[failed - 2][0] + 1} → {to} 站'
+                if failed >= 2 and order[failed - 1][2]:
+                    leg = '回到起点（' + leg + '）'
                 self.finish_route(route, 'aborted', f'{leg}规划检查失败：{reason}')
                 return
             route['checking'] = False
-            for i, point in enumerate(record['points']):
+            state = first
+            while state:
+                i, loop, back = state
                 if route['stop'].is_set():
                     return
-                route.update(index=i, goal=None)
+                point = self.route_pose(points, i, back)
+                route.update(index=i, loop=loop, back=back, target=point, goal=None)
                 reason = self.route_blocker(ws, record)
                 if reason:
                     raise RuntimeError(reason)
@@ -1360,8 +1538,14 @@ class Server:
                     self.finish_route(route, 'canceled', f'第 {i + 1} 点已取消')
                     return
                 if status != GoalStatus.STATUS_SUCCEEDED:
-                    raise RuntimeError('Nav2 未能到达')
-            self.finish_route(route, 'succeeded', '已到达全部导航点')
+                    here = n.lookup(BASE_FRAME)
+                    off = math.hypot(here[0] - pose[0], here[1] - pose[1]) if here and n.fixed == 'map' else None
+                    if off is None or off > ROUTE_ARRIVE_TOL:
+                        raise RuntimeError('Nav2 未能到达' + (f'（离目标 {off:.2f} m）' if off is not None else ''))
+                    n.event('WARN', f'第 {i + 1} 站未精确到达（偏差 {off:.2f} m），视为已到，继续下一站')
+                route['done'] += 1
+                state = self.route_next(len(points), loops, state)
+            self.finish_route(route, 'succeeded', '已到达全部导航点' if loops is None else f'已完成循环 {loops} 圈')
         except Exception as e:
             if not route['stop'].is_set():
                 self.finish_route(route, 'aborted', f'第 {route["index"] + 1} 点失败：{e}')
@@ -1373,7 +1557,9 @@ class Server:
         if not route:
             return goal
         status = route['status']
-        if status != 'active' and time.monotonic() - route['ended'] > 10:
+        # 结束的路线保留 10 s 给网页看结果；期间发了新的导航目标就立刻让位
+        newer = goal and goal.get('status') == 'active' and goal.get('goal') != route['goal']
+        if status != 'active' and (newer or time.monotonic() - route['ended'] > 10):
             self.route = None
             return goal
         record, i = route['record'], route['index']
@@ -1381,8 +1567,17 @@ class Server:
         phase = status
         if status == 'active':
             phase = 'checking' if route['checking'] else leg['phase'] if leg.get('status') == 'active' else 'plan'
+        n, loops = len(record['points']), route['loops']
+        if status == 'succeeded':
+            progress = 1.0
+        elif route['total']:
+            progress = route['done'] / route['total']
+        else:   # 一直循环：显示当前这一圈的进度
+            progress = ((route['done'] - 1) % n) / n if route['done'] else 0.0
         return {**leg, 'type': 'route', 'name': record['name'], 'status': status, 'phase': phase,
-                'goal': record['points'][i], 'point': i + 1, 'count': len(record['points']),
+                'goal': route['target'], 'point': i + 1, 'count': n,
+                'roundTrip': loops is not None, 'loop': route['loop'], 'loops': loops, 'back': route['back'],
+                'progress': progress,
                 'routeId': record['id'], 'pointName': record['points'][i]['name'],
                 'message': route['message'], 'elapsed': route.get('ended', time.monotonic()) - route['started']}
 
@@ -1437,7 +1632,8 @@ class Server:
                     self.transitions[m] = 'stopping'
                 if n.is_armed() or n.nav_active():
                     await self.disarm_and_cancel('切换运行档位')
-                ok = await self.procs.stop_modes()
+                ok = await self.procs.stop_modes()   # 会顺带杀掉遥控用的速度桥（同一个 pkill 模式）
+                self.bridge_t, self.bridge_started = -1e9, False   # 不算异常退出；停完马上可以重新拉起
                 await self.refresh_procs()
                 for m in cur:
                     self.transitions.pop(m, None)
@@ -1446,6 +1642,11 @@ class Server:
                     n.event('INFO', f"已停止{'、'.join(self.MODE_NAME[m] for m in cur) or '巡逻'}")
                 else:
                     n.event('ERROR', '还有导航进程没退出，没有继续启动新档位。可以再点一次，或在扩展坞上执行 nav.sh stop')
+                    return
+            if mode == 'navigation' and (self.procs_status or {}).get('bridge'):
+                await self.stop_bridge('启动导航')
+                if (self.procs_status or {}).get('bridge'):
+                    n.event('ERROR', '遥控用的速度桥没有停掉，没有启动导航（两个速度桥不能同时跑）。可以再点一次')
                     return
             if mode:
                 self.transitions[mode] = 'starting'
@@ -1464,47 +1665,6 @@ class Server:
         finally:
             self.busy = False
 
-    async def start_patrol(self, loops):
-        n, p = self.node, self.node.patrol
-        if self.estop:
-            return False, '急停中：先解除急停'
-        if self.prof('navigation') != 'run':
-            return False, '导航没有运行：先启动「导航」'
-        if not (p['A'] and p['B']):
-            return False, '先在地图上设置 A、B 两个巡逻点'
-        if self.prof('patrol') != 'stop':
-            return False, '巡逻已经在运行'
-        if not 0 <= loops <= 1000:
-            return False, '往返次数要在 0~1000 之间（0 = 一直跑）'
-        self.route = None
-        self.transitions['patrol'] = 'starting'
-        p.update(loops=loops, legs=0, target=None, state='starting')
-        await self.procs.start_patrol(loops)
-        await asyncio.sleep(0.3)
-        await self.refresh_procs()
-        self.background(self.feed_patrol())
-        armed = n.is_armed()
-        return True, '巡逻已启动' + ('' if armed else '：底盘锁定中，patrol.py 会等到解锁后才出发')
-
-    async def feed_patrol(self):
-        """等 patrol.py 订阅上 /patrol_pose，再按 A、B 的顺序发点（它只接受前两个点）。"""
-        n, p = self.node, self.node.patrol
-        try:
-            t0 = time.monotonic()
-            while n.patrol_pub.get_subscription_count() < 1:
-                if time.monotonic() - t0 > 20:
-                    n.event('ERROR', 'patrol.py 20 s 内没有起来，看 data/logs/patrol.log：' + P.tail(os.path.join(DATA, 'logs', 'patrol.log'), 6))
-                    p['state'] = None
-                    return
-                await asyncio.sleep(0.2)
-            await asyncio.sleep(0.5)
-            for k in ('A', 'B'):
-                n.publish_patrol_point(*p[k])
-                await asyncio.sleep(0.3)
-            n.event('INFO', f"巡逻点已发给 patrol.py：{'一直往返' if p['loops'] == 0 else '往返 %d 次' % p['loops']}")
-        finally:
-            self.transitions.pop('patrol', None)
-
     async def bag_start(self, name, topics):
         name = name or time.strftime('web_%m%d_%H%M%S')
         if not P.SAFE_NAME.match(name):
@@ -1516,15 +1676,271 @@ class Server:
             return False, '已经在录包了'
         if any(b['name'] == name for b in self.bags):
             return False, f'data/bags 里已经有 {name}，换个名字'
+        over = await self.bag_quota()
+        if over:
+            return False, f'{over}：已上传的旧包删完了还是超限，先上传或手动删掉一些包再录'
         self.transitions['bag'] = 'starting'
         try:
             await self.procs.start_bag(name, topics)
+            self.bag_name = name
             await asyncio.sleep(0.3)
             await self.refresh_procs()
         finally:
             self.transitions.pop('bag', None)
         self.node.event('INFO', f"开始录包 {name}：{' '.join(topics)}")
         return True, f'开始录包：data/bags/{name}'
+
+    async def bag_delete(self, name, who):
+        # 删掉 data/bags/<name> 整个目录（.mcap + metadata.yaml），删了不能恢复
+        if not name or not P.SAFE_NAME.match(name):
+            return False, '包名不对'
+        bags_dir = os.path.join(DATA, 'bags')
+        self.bags = P.list_bags(bags_dir)
+        if not any(b['name'] == name for b in self.bags):
+            return False, f'data/bags 里没有 {name}'
+        if self.prof('bag') != 'stop' or self.transitions.get('bag'):
+            # 正在录的那个不能删：网页启动的记得名字；后端重启过或者不是网页启动的，保险起见最新的一个也不让删
+            if name in self.recording_names():
+                return False, f'{name} 正在录制，先停止录包再删'
+        if self.uploads.get(name, {}).get('state') == 'run':
+            return False, f'{name} 正在上传，等上传完再删'
+        path = os.path.join(bags_dir, name)
+        if os.path.realpath(os.path.dirname(path)) != os.path.realpath(bags_dir):
+            return False, '包名不对'
+        size = next(b['size'] for b in self.bags if b['name'] == name)
+        try:
+            await asyncio.to_thread(shutil.rmtree, path)
+        except OSError as e:
+            self.bags = P.list_bags(bags_dir)
+            return False, f'删除失败：{e.strerror or e}'
+        self.bags = P.list_bags(bags_dir)
+        self.node.event('WARN', f'已删除录包 {name}（{size:.0f} MB，{who}）')
+        return True, f'已删除录包 {name}'
+
+    async def bag_stop(self):
+        self.transitions['bag'] = 'stopping'
+        try:
+            await self.procs.stop_bag()
+            await self.refresh_procs()
+            self.bags = P.list_bags(os.path.join(DATA, 'bags'))
+        finally:
+            self.transitions.pop('bag', None)
+
+    def bag_over(self, total_mb, free_mb):
+        """超限就返回原因，没超返回空串。"""
+        if total_mb > BAG_LIMIT_GB * 1024:
+            return f'录包总量 {total_mb / 1024:.1f} GB 超过上限 {BAG_LIMIT_GB:.0f} GB'
+        if free_mb is not None and free_mb < BAG_MIN_FREE_GB * 1024:
+            return f'磁盘只剩 {free_mb / 1024:.1f} GB（低于 {BAG_MIN_FREE_GB:.0f} GB）'
+        return ''
+
+    async def bag_quota(self):
+        """容量检查：超限就从最旧的开始删已上传的包。返回删完之后仍然超限的原因（没超返回空串）。"""
+        bags_dir = os.path.join(DATA, 'bags')
+        self.bags = P.list_bags(bags_dir)
+        try:
+            free = shutil.disk_usage(bags_dir).free / 1048576
+        except OSError:
+            free = None
+        total = sum(b['size'] for b in self.bags)
+        over = self.bag_over(total, free)
+        if not over:
+            self.quota_warned = False
+            return ''
+        recording = self.prof('bag') != 'stop' or bool(self.transitions.get('bag'))
+        busy = self.recording_names() if recording else set()
+        for b in reversed(self.bags):   # list_bags 是新的在前
+            if not self.bag_over(total, free):
+                break
+            if b['name'] in busy or self.uploads.get(b['name'], {}).get('state') != 'done':
+                continue
+            ok, _ = await self.bag_delete(b['name'], f'自动清理，{over}')
+            if ok:
+                total -= b['size']
+                free = free + b['size'] if free is not None else None
+        over = self.bag_over(total, free)
+        if not over:
+            self.quota_warned = False
+            return ''
+        if recording and not self.transitions.get('bag'):
+            cur = next((b for b in self.bags if b['name'] in busy), None)
+            disk_low = free is not None and free < BAG_MIN_FREE_GB * 1024
+            if disk_low or (cur and cur['size'] > BAG_LIMIT_GB * 1024):
+                which = ' ' + cur['name'] if cur else ''
+                self.node.event('ERROR', f'{over}，自动停止录包{which}')
+                await self.bag_stop()
+                self.quota_warned = True
+                return over
+        if not self.quota_warned:
+            self.quota_warned = True
+            self.node.event('WARN', f'{over}，已上传的旧包删完了还是超限：没上传的包不会自动删，请上传或手动删除')
+        return over
+
+    def recording_names(self):
+        # 录包中保存的回溯包（snap_ 开头）比正在录的包新，不能把它当成「最新的那个」
+        newest = next((b['name'] for b in self.bags if not b['name'].startswith('snap_')), None)
+        return {getattr(self, 'bag_name', None), newest}
+
+    def rollback_set(self, on, who):
+        self.rollback_on = on
+        try:
+            with open(self.rollback_file, 'w') as f:
+                json.dump({'on': on}, f)
+        except OSError:
+            pass
+        self.node.event('INFO', f"回溯录制已{'打开' if on else '关闭'}（{who}）")
+        return True, f"回溯录制已{'打开' if on else '关闭'}"
+
+    async def stop_bridge(self, why):
+        n = self.node
+        if self.teleop is not None:
+            self.teleop = None
+        if n.is_armed():
+            await self.disarm_and_cancel(why)
+        await self.procs.stop_bridge()
+        await self.refresh_procs()
+
+    async def bridge_tick(self):
+        """没开导航时，保持一个遥控用的速度桥在跑；导航启动 / 运行时不跑（导航自带速度桥）。"""
+        st, n = self.procs_status, self.node
+        if st is None or self.busy:
+            return
+        nav = st.get('navigation') or 'navigation' in self.starting or self.transitions.get('navigation')
+        now = time.monotonic()
+        if not nav and not st.get('bridge') and now - self.bridge_t > BRIDGE_RETRY:
+            if self.bridge_started:
+                n.event('WARN', '遥控用的速度桥退出了，正在重新启动。data/logs/teleop_bridge.log 最后几行：\n'
+                        + P.tail(os.path.join(DATA, 'logs', 'teleop_bridge.log'), 6))
+            self.bridge_t, self.bridge_started = now, True
+            await self.procs.start_bridge()
+        elif nav and st.get('bridge'):
+            self.bridge_started = False
+            await self.stop_bridge('导航启动')
+
+    async def rollback_tick(self):
+        """建图 / 定位 / 导航运行时保持回溯进程在跑，都停了就停掉它。"""
+        st, n = self.procs_status, self.node
+        if st is None:
+            return
+        want = self.rollback_on and any(st.get(m) for m in P.MODES)
+        now = time.monotonic()
+        if want and not st.get('rollback') and now - self.rollback_t > ROLLBACK_RETRY:
+            if self.rollback_started:
+                n.event('WARN', '回溯录制进程退出了，正在重新启动。data/logs/rollback.log 最后几行：\n'
+                        + P.tail(os.path.join(DATA, 'logs', 'rollback.log'), 6))
+            self.rollback_t, self.rollback_started = now, True
+            await self.procs.start_rollback(ROLLBACK_SECONDS)
+        elif st.get('rollback') and not want:
+            self.rollback_started = False
+            await self.procs.stop_rollback()
+
+    async def rollback_save(self, who):
+        if not (self.procs_status or {}).get('rollback'):
+            return False, '回溯录制没在运行：先打开回溯，并启动建图 / 定位 / 导航'
+        if self.rollback_saving:
+            return False, '正在保存上一段，请稍等'
+        self.rollback_saving = True
+        name, bags_dir = time.strftime('snap_%m%d_%H%M%S'), os.path.join(DATA, 'bags')
+        work = os.path.join(bags_dir, '.rollback')
+        error, done = os.path.join(work, f'{name}.error'), os.path.join(bags_dir, name, 'metadata.yaml')
+        try:
+            os.makedirs(work, exist_ok=True)
+            tmp = os.path.join(work, 'request.tmp')
+            with open(tmp, 'w') as f:
+                f.write(name)
+            os.replace(tmp, os.path.join(work, 'request'))
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < ROLLBACK_SAVE_TIMEOUT:
+                if os.path.exists(error):
+                    with open(error, errors='replace') as f:
+                        why = f.read()[:300]
+                    os.remove(error)
+                    self.node.event('ERROR', f'回溯保存失败：{why}')
+                    return False, f'回溯保存失败：{why}'
+                if os.path.exists(done):
+                    self.bags = P.list_bags(bags_dir)
+                    b = next((x for x in self.bags if x['name'] == name), {})
+                    info = f"{b.get('dur') or 0:.0f} 秒，{b.get('size', 0):.0f} MB"
+                    self.node.event('INFO', f'已保存回溯 {name}（{info}，{who}）')
+                    return True, f'已保存回溯 {name}（{info}）'
+                await asyncio.sleep(0.1)
+            self.node.event('ERROR', f'回溯保存超时（{ROLLBACK_SAVE_TIMEOUT:.0f} s），看 data/logs/rollback.log')
+            return False, '回溯保存超时，看 data/logs/rollback.log'
+        finally:
+            self.rollback_saving = False
+
+    async def bag_upload(self, name, who):
+        """rsync 把 data/bags/<name> 传到 166:~/go2w_bags/<name>。同一时间只传一个；进度和结果进网页日志。"""
+        if not name or not P.SAFE_NAME.match(name):
+            return False, '包名不对'
+        bags_dir = os.path.join(DATA, 'bags')
+        self.bags = P.list_bags(bags_dir)
+        bag = next((b for b in self.bags if b['name'] == name), None)
+        if bag is None:
+            return False, f'data/bags 里没有 {name}'
+        if self.prof('bag') != 'stop' or self.transitions.get('bag'):
+            if name in self.recording_names():
+                return False, f'{name} 正在录制，先停止录包再上传'
+        busy = next((k for k, u in self.uploads.items() if u['state'] == 'run'), None)
+        if busy:
+            return False, f'正在上传 {busy}，等它传完'
+        key = os.path.join(DATA, 'ssh', 'id_ed25519')
+        if not os.path.exists(key) or not shutil.which('rsync') or not shutil.which('ssh'):
+            return False, '扩展坞上缺上传工具：需要 data/ssh 密钥，以及镜像里的 rsync / ssh（重建 go2w-humble 镜像）'
+        self.uploads[name] = {'state': 'run', 'pct': 0, 'msg': '连接中'}
+        asyncio.create_task(self.bag_upload_run(name, bag['size'], key, who))
+        return True, f'开始上传 {name} → {UPLOAD_LABEL}'
+
+    async def bag_upload_run(self, name, size, key, who):
+        n, t0 = self.node, time.monotonic()
+        ssh = (f'ssh -i {key} -o UserKnownHostsFile={os.path.join(DATA, "ssh", "known_hosts")} '
+               '-o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=10')
+        n.event('INFO', f'开始上传录包 {name}（{size:.0f} MB）→ {UPLOAD_LABEL}（{who}）')
+        tail, last_pct = deque(maxlen=6), 0
+        try:
+            p = await asyncio.create_subprocess_exec(
+                'rsync', '-rt', '--partial', '--info=progress2', '--no-inc-recursive', '-e', ssh,
+                os.path.join(DATA, 'bags', name), UPLOAD_DEST,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            buf = b''
+            while True:
+                chunk = await p.stdout.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                # progress2 用 \r 刷新同一行：「  12,345,678  45%   10.2MB/s    0:00:12」
+                *lines, buf = buf.replace(b'\r', b'\n').split(b'\n')
+                for raw in lines:
+                    line = raw.decode('utf-8', 'replace').strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1].endswith('%') and parts[1][:-1].isdigit():
+                        pct = int(parts[1][:-1])
+                        self.uploads[name] = {'state': 'run', 'pct': pct, 'msg': parts[2]}
+                        if pct // 25 > last_pct // 25 and pct < 100:
+                            n.event('INFO', f'上传 {name}：{pct}%（{parts[2]}）')
+                        last_pct = max(last_pct, pct)
+                    else:
+                        tail.append(line)
+            code = await p.wait()
+        except Exception as e:
+            code, tail = -1, deque([repr(e)])
+        dt = time.monotonic() - t0
+        if code == 0:
+            msg = time.strftime('%m-%d %H:%M')
+            self.uploads[name] = {'state': 'done', 'pct': 100, 'msg': msg}
+            done = {k: u['msg'] for k, u in self.uploads.items() if u['state'] == 'done'}
+            try:
+                with open(self.uploads_file, 'w') as f:
+                    json.dump(done, f, ensure_ascii=False, indent=1)
+            except OSError:
+                pass
+            n.event('INFO', f'已上传录包 {name} → {UPLOAD_LABEL}/{name}（{size:.0f} MB，用时 {dt:.0f} s）')
+        else:
+            why = ' | '.join(tail) or f'rsync 退出码 {code}'
+            self.uploads[name] = {'state': 'fail', 'pct': last_pct, 'msg': why[-200:]}
+            n.event('ERROR', f'上传录包 {name} 失败（退出码 {code}，{dt:.0f} s）：{why[-300:]}')
 
     async def save_map(self, name):
         if self.busy or self.map_loading:
@@ -1542,6 +1958,8 @@ class Server:
             if await self.procs.save_map(name):
                 self.maps = P.list_maps(os.path.join(DATA, 'maps'))
                 self.node.event('INFO', f'地图已保存：data/maps/{name}')
+                if MAPPING_VIEW in self.map_views:   # 建图时调好的显示方向带给新地图
+                    await self.set_view(name, self.map_views[MAPPING_VIEW])
                 return True, f'地图已保存：{name}'
             return False, '保存失败：' + (P.tail(os.path.join(DATA, 'logs', 'save_map.log'), 6) or '看 data/logs/save_map.log')
         finally:
@@ -1573,7 +1991,6 @@ class Server:
             return False, f'data/maps 里没有 {name}'
         if not n.loadmap_cli.service_is_ready():
             self.map_choice = name
-            n.patrol['A'] = n.patrol['B'] = None
             return True, f'下次启动定位 / 导航时用 {name}'
         if self.map_loading:
             return False, '正在切换地图'
@@ -1585,8 +2002,7 @@ class Server:
             r = await self.aw(n.load_map(name), 10.0)
             if r.result != 0:
                 return False, f'map_server 加载失败（错误码 {r.result}）'
-            n.map_current = name
-            n.patrol['A'] = n.patrol['B'] = None
+            n.map_current = n.map_loaded = name
         finally:
             self.map_loading = False
         n.event('WARN', f'已切换到地图 {name}：请重新设置初始位姿')
@@ -1603,6 +2019,14 @@ class Server:
                 if self.procs_status is not None or k == 1:
                     n.get_logger().warn(f'查不到进程状态（{e!r}），运行档位只按节点判断')
                 self.procs_status = None
+            try:
+                await self.rollback_tick()
+            except Exception as e:
+                n.get_logger().warn(f'回溯录制启停失败：{e!r}')
+            try:
+                await self.bridge_tick()
+            except Exception as e:
+                n.get_logger().warn(f'遥控速度桥启停失败：{e!r}')
             names = set(n.get_node_names())
             for m, t0 in list(self.starting.items()):
                 age = time.monotonic() - t0
@@ -1618,7 +2042,11 @@ class Server:
                     n.event('ERROR', f'{self.MODE_NAME[m]} {START_TIMEOUT:.0f} s 内没有起来，看 data/logs/{m}.log')
             if k % 3 == 1:
                 self.maps = P.list_maps(os.path.join(DATA, 'maps'))
-                self.bags = P.list_bags(os.path.join(DATA, 'bags'))
+                try:
+                    await self.bag_quota()   # 顺带刷新 self.bags
+                except Exception as e:
+                    self.bags = P.list_bags(os.path.join(DATA, 'bags'))
+                    n.get_logger().warn(f'录包容量检查失败：{e!r}')
                 n.fetch_map_current()
             await asyncio.sleep(2.0)
 
@@ -1672,10 +2100,12 @@ class Server:
     async def ws(self, req):
         ws = web.WebSocketResponse(max_msg_size=1 << 20)
         await ws.prepare(req)
-        self.clients[ws] = {'remote': req.remote, 'last_ping': time.monotonic(), 'layers': set()}
-        self.node.get_logger().info(f'client connected: {req.remote} ({len(self.clients)})')
+        remote = client_ip(req)
+        self.clients[ws] = {'remote': remote, 'last_ping': time.monotonic(), 'layers': set()}
+        self.node.get_logger().info(f'client connected: {remote} ({len(self.clients)})')
         try:
             await ws.send_str(self.routes_message())
+            await ws.send_str(self.views_message())
             if self.node.map_blob:
                 await ws.send_bytes(self.node.map_blob)
             if self.node.plan:
@@ -1701,6 +2131,9 @@ class Server:
                             await ws.send_bytes(blob)
                 elif d.get('t') == 'teleop':
                     self.on_teleop(ws, d)
+                elif d.get('t') == 'cam':
+                    r = await self.camera.request(ws, remote, bool(d.get('on')), bool(d.get('take')))
+                    await ws.send_str(json.dumps({'t': 'cam', **r}))
                 elif d.get('t') == 'inspect' and isinstance(d.get('topic'), str):
                     self.set_inspect(ws, d['topic'], bool(d.get('on')))
                 elif d.get('t') == 'cmd':
@@ -1711,11 +2144,12 @@ class Server:
         finally:
             for topic in list(self.clients.get(ws, {}).get('inspect', ())):
                 self.set_inspect(ws, topic, False)
+            await self.camera.release(ws)
             self.clients.pop(ws, None)
-            self.node.get_logger().info(f'client gone: {req.remote} ({len(self.clients)})')
+            self.node.get_logger().info(f'client gone: {remote} ({len(self.clients)})')
             if ws is self.owner:
                 self.owner = None
-                await self.lose_owner(f'控制方网页断开（{req.remote}）')
+                await self.lose_owner(f'控制方网页断开（{remote}）')
         return ws
 
     async def lose_owner(self, reason):
@@ -1805,7 +2239,8 @@ class Server:
                     await self.send_all(json.dumps({'t': 'logs', 'items': items}))
                 if k % 10 == 0:  # 状态 2 Hz
                     st = n.state(self.sys.read(), self.procs_status, self.transitions)
-                    st.update(estop=self.estop, busy=self.busy, mapBusy=self.map_busy, maps=self.maps, bags=self.bags, mapChoice=self.map_choice,
+                    st.update(estop=self.estop, busy=self.busy, mapBusy=self.map_busy, maps=self.maps, bags=self.bags, uploads=self.uploads, mapChoice=self.map_choice,
+                              rollback={'on': self.rollback_on, 'run': bool((self.procs_status or {}).get('rollback')), 'saving': self.rollback_saving, 'seconds': ROLLBACK_SECONDS},
                               procsKnown=self.procs_status is not None, teleop=self.teleop is not None)
                     await self.send_all(json.dumps(st))
                 # topic 查看器：只发给正在看这个 topic 的网页
@@ -1838,18 +2273,32 @@ class Server:
 
         async def start(a):
             a['tasks'] = [asyncio.create_task(self.broadcast()), asyncio.create_task(self.safety()),
-                          asyncio.create_task(self.procs_poll())]
+                          asyncio.create_task(self.procs_poll()), asyncio.create_task(self.camera.monitor())]
 
         async def stop(a):
             if self.route_running():
                 await self.disarm_and_cancel('网页服务关闭')
                 await asyncio.gather(self.route_job, return_exceptions=True)
+            await self.camera.release()
             for t in a['tasks']:
                 t.cancel()
 
         app.on_startup.append(start)
         app.on_cleanup.append(stop)
         return app
+
+
+# 经常驻服务器（192.168.1.166，nginx）转发的连接，req.remote 都是服务器的地址；
+# 只有来自这些代理的请求才信任 X-Forwarded-For，别人发这个头伪造不了 IP
+TRUSTED_PROXIES = set(filter(None, os.environ.get('GO2W_TRUSTED_PROXIES', '192.168.1.166').split(',')))
+
+
+def client_ip(req):
+    if req.remote in TRUSTED_PROXIES:
+        fwd = req.headers.get('X-Forwarded-For', '').split(',')[-1].strip()
+        if fwd:
+            return f'{fwd} 经 {req.remote}'
+    return req.remote
 
 
 def main():
