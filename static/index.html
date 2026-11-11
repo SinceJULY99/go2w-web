@@ -25,6 +25,7 @@
       <div class="chip" id="chLoc"><i></i><span class="k">定位</span><b>--</b></div>
       <div class="chip" id="chOdom"><i></i><span class="k">里程计</span><b>--</b></div>
       <div class="chip" id="chBase"><i></i><span class="k">底盘</span><b>--</b></div>
+      <div class="chip" id="chPose" hidden><i></i><span class="k">姿态</span><b>--</b></div>
       <div class="chip" id="chCpu"><i></i><span class="k">CPU</span><b>--</b></div>
       <div class="chip" id="chMem"><i></i><span class="k">内存</span><b>--</b></div>
       <div class="chip rec" id="chRec" hidden><i></i><span class="k">录包</span><b>00:00</b></div>
@@ -56,6 +57,13 @@
           <div><span>速度</span><b id="sSpd">--</b></div>
           <div><span>今日里程</span><b id="sOdo">--</b></div>
           <div><span>坐标系</span><b id="sFrame">--</b></div>
+        </div>
+        <!-- 运控姿态：站起 / 趴下；网页站起来（或跑完任务）后空闲 30 s 原地趴下，倒计时时可以「保持站立」 -->
+        <div class="pose-row" id="poseRow" hidden>
+          <span class="pose-txt" id="poseTxt">--</span>
+          <button class="btn sm" id="poseHold" hidden title="不自动趴下，直到下次出发或手动趴下">保持站立</button>
+          <button class="btn sm" id="poseUp">站起</button>
+          <button class="btn sm danger" id="poseDown">趴下</button>
         </div>
       </section>
 
@@ -137,9 +145,8 @@
       <section class="panel drawer" id="drawer">
         <div class="drawer-grip" id="drawerGrip" title="拖动调整高度，双击恢复默认"></div>
         <div class="dh">
-          <button class="dtab on" data-pane="pLogs">日志</button>
+          <button class="dtab on" data-pane="pLogs">日志与录包</button>
           <button class="dtab" data-pane="pPlots">曲线</button>
-          <button class="dtab" data-pane="pMaps">地图与录包</button>
           <div class="sp"></div>
           <div id="logFilters" style="display:flex;gap:4px">
             <button class="fchip on" data-lv="ALL">全部</button><button class="fchip" data-lv="INFO">INFO</button><button class="fchip" data-lv="WARN">WARN</button><button class="fchip" data-lv="ERROR">ERROR</button>
@@ -147,7 +154,6 @@
           <button class="ib" id="drawerToggle" title="收起 / 展开" style="width:28px;height:28px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 9l6 6 6-6"/></svg></button>
         </div>
         <div class="db">
-          <div class="dpane logs" id="pLogs"></div>
           <div class="dpane" id="pPlots" hidden>
             <div class="plots">
               <div class="plot-side" id="plotSide">
@@ -160,25 +166,21 @@
               <div class="plot-grid" id="plotGrid"></div>
             </div>
           </div>
-          <div class="dpane" id="pMaps" hidden>
+          <div class="dpane" id="pLogs">
             <div class="mb">
-              <div>
-                <h4>地图 <span class="mono" style="color:var(--muted);font-size:11px">data/maps</span></h4>
-                <div class="hint">保存地图、地图对齐在右栏「建图」里。</div>
-                <div id="mapList"></div>
-              </div>
+              <div class="logs" id="logBox"></div>
               <div>
                 <h4>录包 <span class="mono" style="color:var(--muted);font-size:11px">data/bags</span></h4>
-                <!-- 默认录一次导航的全过程（不含点云）；空格或换行分隔，可以直接增删，刷新页面恢复默认 -->
-                <div class="inrow bag-row"><textarea id="bagTopics" rows="4" spellcheck="false" autocomplete="off" aria-label="录包 topic，空格或换行分隔">/tf /tf_static /robot_description /map
+                <!-- 默认录一次导航的全过程（含 MID360 原始点云 + IMU）；空格或换行分隔，可以直接增删，刷新页面恢复默认 -->
+                <div class="inrow bag-row"><textarea id="bagTopics" rows="5" spellcheck="false" autocomplete="off" aria-label="录包 topic，空格或换行分隔">/tf /tf_static /robot_description /map
 /odom /odom_healthy /scan /amcl_pose /initialpose /particle_cloud
 /goal_pose /plan /transformed_global_plan
 /local_costmap/costmap /global_costmap/costmap
 /cmd_vel_nav /cmd_vel /go2w_cmd_bridge/armed
 /navigate_to_pose/_action/status /navigate_to_pose/_action/feedback /follow_path/_action/status
-/behavior_tree_log /rosout</textarea><button class="btn sm" id="bagBtn">开始录包</button></div>
-                <label class="bag-tip bag-livox"><input type="checkbox" id="bagLivox"> 加录 MID360 原始点云 + IMU（/livox/lidar /livox/imu，约 4 MB/s，一小时十几 GB；雷达驱动随档位启动，没开档位时录不到）</label>
-                <div class="bag-tip">空格或换行分隔，可直接增删。要复现障碍物再加 /cloud_registered_body（数据量大）</div>
+/behavior_tree_log /rosout
+/livox/lidar /livox/imu</textarea><button class="btn sm" id="bagBtn">开始录包</button></div>
+                <div class="bag-tip">录包时每 30 秒存成一个包，包名按这一段的开始时间（web_月日_时分秒）。topic 空格或换行分隔，可直接增删。默认含 MID360 原始点云 + IMU（约 4 MB/s，雷达驱动随档位启动）。要复现障碍物再加 /cloud_registered_body（数据量大）</div>
                 <div class="inrow rb-row"><label class="bag-livox"><input type="checkbox" id="rbOn"> 回溯录制</label><span class="meta rb-state" id="rbState"></span><button class="btn sm pri" id="rbSave">保存刚才 20 秒</button></div>
                 <div id="bagList"></div>
               </div>
@@ -200,28 +202,20 @@
       </section>
 
       <section class="panel card" id="flowNone">
-        <div class="note">先在上面选择这次要做的事：<br><b>导航</b>：选地图 → 初始位置 → 任务 → 参数 → 启动<br><b>重定位</b>：导航跑久了定位偏了，停车修正<br><b>建图</b>：遥控走一圈，保存新地图</div>
+        <div class="note">先在上面选择这次要做的事：<br><b>导航</b>：选地图 → 任务 → 参数 → 出发前自检 → 出发<br><b>重定位</b>：导航跑久了定位偏了，停车修正<br><b>建图</b>：遥控走一圈，保存新地图</div>
       </section>
 
       <section class="panel card" id="flowNav" hidden>
-        <div class="note" id="navOff" hidden>导航没有运行。<button class="btn sm pri" id="navStart">启动导航…</button></div>
         <div class="flow" id="navFlow">
           <div class="step" id="stMap" data-s="todo">
             <div class="step-h"><div class="step-n"><span>1</span></div><div class="step-t">地图<span class="step-s" id="stMapSub"></span></div><button class="btn sm ghost step-more" data-open="stMap" hidden>更改</button></div>
             <div class="step-b">
-              <p class="hint">换地图后 map_server 立即加载新图，当前位姿作废，要重新给初始位置。</p>
-              <div class="inrow"><select id="navMapSel" aria-label="地图"></select><button class="btn sm" id="navMapLoad">加载</button></div>
-            </div>
-          </div>
-          <div class="step" id="stInit" data-s="todo">
-            <div class="step-h"><div class="step-n"><span>2</span></div><div class="step-t">初始位置<span class="step-s" id="stInitSub"></span></div><button class="btn sm ghost step-more" data-open="stInit" hidden>更改</button></div>
-            <div class="step-b">
-              <p class="hint">用地图工具栏的「初始位姿」（快捷键 2）：在机器人实际位置按住，往车头方向拖动后松开。设好后看激光和墙是否对上。</p>
-              <div class="inrow"><button class="btn sm pri" id="navInitBtn">在地图上选择初始位置</button><button class="btn sm" id="navInitOk" title="AMCL 现在的位姿是对的，不用重新设置">当前位置正确</button></div>
+              <p class="hint" id="navMapHint">导航不用先开：选好地图就能编辑任务，出发前自检时用这张图启动导航。</p>
+              <div class="inrow"><select id="navMapSel" aria-label="地图"></select><button class="btn sm" id="navMapLoad">切换</button></div>
             </div>
           </div>
           <div class="step" id="stRoute" data-s="todo">
-            <div class="step-h"><div class="step-n"><span>3</span></div><div class="step-t">导航任务<span class="step-s" id="stRouteSub"></span></div><button class="btn sm ghost step-more" data-open="stRoute" hidden>更改</button></div>
+            <div class="step-h"><div class="step-n"><span>2</span></div><div class="step-t">导航任务<span class="step-s" id="stRouteSub"></span></div><button class="btn sm ghost step-more" data-open="stRoute" hidden>更改</button></div>
             <div class="step-b">
               <div class="route-form">
                 <div class="inrow">
@@ -242,6 +236,20 @@
               </div>
             </div>
           </div>
+          <div class="step" id="stPrep" data-s="todo">
+            <div class="step-h"><div class="step-n"><span>3</span></div><div class="step-t">出发前自检<span class="step-s" id="stPrepSub"></span></div><button class="btn sm ghost step-more" data-open="stPrep" hidden>详情</button></div>
+            <div class="step-b">
+              <ul class="prep-list" id="prepList">
+                <li data-k="stand"><i></i><span>站立</span><small></small></li>
+                <li data-k="nav"><i></i><span>启动导航</span><small></small></li>
+                <li data-k="loc"><i></i><span>自动定位</span><small></small></li>
+                <li data-k="route"><i></i><span>路径检查</span><small></small></li>
+              </ul>
+              <div class="note" id="navAutoNote" hidden></div>
+              <div class="inrow" id="prepLocRow" hidden><button class="btn sm pri" id="navAutoBtn">自动定位</button><button class="btn sm" id="navInitBtn">在地图上选择</button><button class="btn sm" id="navInitOk" title="AMCL 现在的位姿是对的，不用重新设置">当前位置正确</button></div>
+              <div class="btn-row"><button class="btn pri" id="prepRun">开始自检</button><button class="btn ghost" id="prepStop" hidden>停止自检</button></div>
+            </div>
+          </div>
           <div class="step" id="stParam" data-s="todo">
             <div class="step-h"><div class="step-n"><span>4</span></div><div class="step-t">运行参数<span class="step-s" id="stParamSub"></span></div><button class="btn sm ghost step-more" data-open="stParam" hidden>更改</button></div>
             <div class="step-b">
@@ -252,13 +260,13 @@
             </div>
           </div>
           <div class="step" id="stGo" data-s="todo">
-            <div class="step-h"><div class="step-n"><span>5</span></div><div class="step-t">启动导航<span class="step-s" id="stGoSub"></span></div><button class="btn sm ghost step-more" data-open="stGo" hidden>更改</button></div>
+            <div class="step-h"><div class="step-n"><span>5</span></div><div class="step-t">出发<span class="step-s" id="stGoSub"></span></div><button class="btn sm ghost step-more" data-open="stGo" hidden>更改</button></div>
             <div class="step-b">
               <div class="route-launch">
-                <button class="btn pri big" id="routeRun" aria-describedby="routeRunHint" disabled>启动导航</button>
+                <button class="btn pri big" id="routeRun" aria-describedby="routeRunHint" disabled>出发</button>
                 <div class="route-hint" id="routeRunHint" aria-live="polite"></div>
               </div>
-              <p class="hint">会弹出确认框列出这次的设置；确认后底盘自动解锁并立即出发。</p>
+              <p class="hint">自检全部通过后才能点。点了底盘自动解锁并立即出发，随时可以按急停（Space）或「取消」。</p>
             </div>
           </div>
         </div>
@@ -304,7 +312,8 @@
           <div class="reloc-delta" id="relocDelta"></div>
           <div class="inrow"><button class="btn sm ghost" id="relocUndo" disabled>撤销改动</button><button class="btn sm pri" id="relocApply" disabled style="flex:1">应用到 AMCL</button></div>
         </div>
-        <div class="inrow" style="margin-top:10px"><button class="btn sm" id="relocInit" title="偏得太远、微调不过来时，用「初始位姿」工具重新点一个位置">重新给位置</button><button class="btn sm" id="relocBack" style="flex:1">完成，返回导航</button></div>
+        <div class="note" id="relocAutoNote" hidden style="margin-top:10px"></div>
+        <div class="inrow" style="margin-top:10px"><button class="btn sm" id="relocAuto" title="用当前激光在整张地图上自动找机器人位置（机器人要静止）。结果可信才发给 AMCL">自动定位</button><button class="btn sm" id="relocInit" title="偏得太远、微调不过来时，用「初始位姿」工具重新点一个位置">重新给位置</button><button class="btn sm" id="relocBack" style="flex:1">完成，返回导航</button></div>
       </section>
 
       <section class="panel card" id="flowMap" hidden>
@@ -321,7 +330,7 @@
             <div class="step-b">
               <p class="hint">慢速走完整个区域，最后回到起点附近形成闭环；墙角、门口多停一下。遥控前要先在「底盘控制」里解锁。</p>
               <div class="inrow"><button class="btn sm" id="mapTele">键盘遥控 (T)</button></div>
-              <label class="map-chk"><input type="checkbox" id="mapBag"><span>同时录包（data/bags；topic 在底部「地图与录包」里改）</span></label>
+              <label class="map-chk"><input type="checkbox" id="mapBag"><span>同时录包（data/bags；topic 在底部「日志与录包」里改）</span></label>
             </div>
           </div>
           <div class="step" id="mpAlign" data-s="todo">

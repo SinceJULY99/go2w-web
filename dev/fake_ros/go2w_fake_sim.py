@@ -94,7 +94,7 @@ class Sim:
         self.th, self.v, self.w_ = 0.0, 0.0, 0.0
 
         # 进程：开机时导航已经在跑（和平时 nav.sh start 之后一样）
-        self.procs = {'mapping': False, 'localization': False, 'navigation': True, 'patrol': False, 'bag': False, 'bridge': False}
+        self.procs = {'mapping': False, 'localization': False, 'navigation': True, 'patrol': False, 'bag': False, 'bridge': False, 'bag_seg': False}
         self.ready_at = {'navigation': 0.0}
         # 假 cmd_bridge
         self.armed = False
@@ -105,6 +105,41 @@ class Sim:
         # 假 patrol.py、录包
         self.pat = None
         self.bag = None
+        # 假运控（go2w_ctrl）：Passive / FixStand / Velocity，只在 Velocity 里执行速度指令。
+        # 真机开机后停在 FixStand；这里默认在 Velocity，老的测试不用先站起来（GO2W_FAKE_CTRL=Passive 从趴着开始）
+        self.ctrl = {'state': os.environ.get('GO2W_FAKE_CTRL', 'Velocity'), 'seq': 1, 't': -1e9}
+        self.ctrl_req = None   # (api_id, 收到时间)：和真的一样只留最新一条，0.2 s 后作废
+        self.ctrl_sent = None  # 上次发出的 (state, ready, seq)
+
+    # ---------- 假运控 ----------
+    CTRL_INTERP = 2.0   # FixStand 插值时间
+    CTRL_MOVES = {('Passive', 1004): 'FixStand', ('FixStand', 1002): 'Velocity',
+                  ('FixStand', 1005): 'Passive', ('Velocity', 1005): 'Passive'}
+
+    def ctrl_ready(self, now):
+        c = self.ctrl
+        return c['state'] != 'FixStand' or now - c['t'] >= self.CTRL_INTERP
+
+    def ctrl_step(self, now):
+        r, c = self.ctrl_req, self.ctrl
+        if r and now - r[1] > 0.2:
+            self.ctrl_req = r = None
+        nxt = r and self.CTRL_MOVES.get((c['state'], r[0]))
+        if nxt:
+            self.ctrl_req = None
+            c.update(state=nxt, seq=c['seq'] + 1, t=now)
+            self.rosout(20 if nxt != 'Passive' else 30, 'go2w_ctrl', f'FSM: Change state to {nxt}')
+            if nxt == 'Passive':
+                self.v = self.w_ = 0.0   # 卸力塌下：立刻停
+
+    def ctrl_msg(self, now, force):
+        from std_msgs.msg import String
+        c = self.ctrl
+        cur = (c['state'], self.ctrl_ready(now), c['seq'])
+        if not force and cur == self.ctrl_sent:
+            return None
+        self.ctrl_sent = cur
+        return String('{"state":"%s","ready":%s,"seq":%d}' % (cur[0], 'true' if cur[1] else 'false', cur[2]))
 
     def load(self, yaml_path):
         self.grid, self.res, self.ox, self.oy = load_map(yaml_path)
@@ -195,24 +230,44 @@ class Sim:
         self.v = self.w_ = 0.0
         self.rosout(20, 'launch', 'all processes have finished cleanly')
 
-    def bag_start(self, name, topics):
-        self.procs['bag'] = True
-        self.bag = {'name': name, 't0': time.monotonic(), 'topics': topics}
-        self.rosout(20, 'rosbag2_recorder', f"Recording to '{name}'. Subscribed to {len(topics)} topics")
+    def bag_start(self, prefix, topics, seconds=30):
+        # 和 scripts/segment_recorder.py 一样：每 seconds 秒一个包，名字 = 前缀_MMDD_HHMMSS（这一段的开始时间）
+        self.procs['bag'] = self.procs['bag_seg'] = True
+        self.bag = {'prefix': prefix, 't0': time.monotonic(), 'wall0': time.time(), 'topics': topics,
+                    'seconds': float(os.environ.get('GO2W_FAKE_BAG_SEGMENT', seconds))}
+        self.rosout(20, 'go2w_segment_recorder', f"分段录包开始：每 {self.bag['seconds']:.0f} 秒一个包，前缀 {prefix}，{len(topics)} 个 topic")
 
-    def bag_stop(self):
-        if not self.bag:
+    def bag_segment(self, now):
+        b = self.bag
+        dur = now - b['t0']
+        if dur < 0.2:
             return
-        dur = time.monotonic() - self.bag['t0']
-        d = os.path.join(DATA, 'bags', self.bag['name'])
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, f"{self.bag['name']}_0.mcap"), 'wb') as f:
+        base = f"{b['prefix']}_" + time.strftime('%m%d_%H%M%S', time.localtime(b['wall0']))
+        name, k = base, 1
+        while os.path.exists(os.path.join(DATA, 'bags', name)):
+            k += 1
+            name = f'{base}_{k}'
+        d = os.path.join(DATA, 'bags', name)
+        os.makedirs(d)
+        with open(os.path.join(d, f'{name}_0.mcap'), 'wb') as f:
             f.write(b'\0' * int(dur * 50_000))   # 假数据：每秒约 50 KB
         with open(os.path.join(d, 'metadata.yaml'), 'w') as f:
             f.write(f'rosbag2_bagfile_information:\n  version: 5\n  storage_identifier: mcap\n'
                     f'  duration:\n    nanoseconds: {int(dur * 1e9)}\n')
-        self.procs['bag'], self.bag = False, None
-        self.rosout(20, 'rosbag2_recorder', 'Recording stopped')
+        b['t0'], b['wall0'] = now, b['wall0'] + dur
+        self.rosout(20, 'go2w_segment_recorder', f'已保存 {name}')
+
+    def bag_tick(self):
+        if self.bag and time.monotonic() - self.bag['t0'] >= self.bag['seconds']:
+            self.bag_segment(time.monotonic())
+
+    def bag_stop(self):
+        if not self.bag:
+            return
+        self.bag_segment(time.monotonic())
+        self.procs['bag'] = self.procs['bag_seg'] = False
+        self.bag = None
+        self.rosout(20, 'go2w_segment_recorder', '分段录包已停止')
 
     def save_map(self, name):
         if not self.ready('mapping'):
@@ -356,6 +411,8 @@ class Sim:
             yaw = 2 * math.atan2(p.orientation.z, p.orientation.w)
             self.pat['points'].append((p.position.x, p.position.y, yaw))
             self.plog(20, '%s 点：(%.2f, %.2f)，朝向 %.0f°' % ('AB'[len(self.pat['points']) - 1], p.position.x, p.position.y, math.degrees(yaw)))
+        elif topic == '/api/sport/request':
+            self.ctrl_req = (msg.header.identity.api_id, time.monotonic())
         elif topic == '/cmd_vel':
             self.teleop = (msg.linear.x, msg.linear.y, msg.angular.z, time.monotonic())
 
@@ -574,6 +631,7 @@ class Sim:
 
     # ---------- 运动 ----------
     def step(self, dt, now):
+        self.bag_tick()
         tv, tw = self.nav_step(now)
         nav_moving = self.goal and self.goal['status'] in (ACCEPTED, EXECUTING)
         t = self.teleop
@@ -581,6 +639,8 @@ class Sim:
             tv, tw = t[0], t[2]          # 键盘遥控：cmd_bridge 只认最新的 /cmd_vel
         if not self.armed or not self.bridge_up():
             tv = tw = 0.0          # 上锁：cmd_bridge 不执行任何速度指令
+        if self.ctrl['state'] != 'Velocity':
+            tv = tw = 0.0          # 运控不在策略里：Move 不执行
         self.v += max(-dt, min(dt, tv - self.v))            # 加速度 1 m/s²
         self.w_ += max(-2*dt, min(2*dt, tw - self.w_))
         if not self.armed:
@@ -708,12 +768,12 @@ def run(node):
     os.makedirs(os.path.join(DATA, 'maps'), exist_ok=True)
     sim = Sim(node)
     node.fake_sim = sim
-    sim.deliver_map()
     sim.publish_status()
 
     k, dt = 0, 0.05
     nxt = time.monotonic()
-    map_sent = True
+    # 和真机一样：只有 map_server / slam_toolbox 在跑时才有 /map（导航没开时网页显示后端直接读的地图文件）
+    map_sent = False
     while True:
         while True:
             try:
@@ -723,9 +783,13 @@ def run(node):
         for cb in list(node._timers):
             cb()
         now = time.monotonic()
+        sim.ctrl_step(now)
         sim.step(dt, now)
         sim.patrol_step(now)
         k += 1
+        cm = sim.ctrl_msg(now, k % 2 == 0)   # /go2w_ctrl/state：10 Hz，变化时立刻补发；和导航档位无关（运控一直在跑）
+        if cm is not None:
+            node.deliver('/go2w_ctrl/state', cm)
         alive, nav = sim.any_ready(), sim.ready('navigation')
         # /map 是 latched：定位 / 建图起来时补发一次
         map_up = sim.loc_ready() or sim.ready('mapping')

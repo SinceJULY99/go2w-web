@@ -64,7 +64,9 @@ from std_srvs.srv import SetBool
 from tf2_ros import Buffer, TransformListener
 
 import camera as C
+import mapfile
 import procs as P
+import robot_ctrl as R
 
 # 二进制帧类型。代价地图 / 点云 / 粒子较重，只发给打开了对应图层的网页
 T_MAP, T_SCAN, T_GCOST, T_LCOST, T_CLOUD, T_PART = 1, 2, 3, 4, 5, 6
@@ -87,6 +89,11 @@ BAG_MIN_FREE_GB = float(os.environ.get('GO2W_BAG_MIN_FREE_GB', '10'))
 ROLLBACK_SECONDS = 20         # 回溯录制的长度
 ROLLBACK_RETRY = 30.0         # 回溯进程退出后，隔多久再拉起来
 ROLLBACK_SAVE_TIMEOUT = 20.0  # 等存包完成的最长时间
+# 卡住自动保存：导航目标没结束、底盘已解锁、没急停，odom 位置在 STUCK_MOVE 内、朝向在 STUCK_TURN 内
+# 持续 STUCK_SECONDS 就算卡住；再等 STUCK_DELAY 存回溯包（stuck_ 开头），两次自动保存至少隔 STUCK_COOLDOWN
+STUCK_SECONDS = float(os.environ.get('GO2W_STUCK_SECONDS', '8'))
+STUCK_MOVE, STUCK_TURN = 0.08, 0.15
+STUCK_DELAY, STUCK_COOLDOWN = 2.0, 60.0
 # 档位进程起来后，看到这些节点才算「运行中」
 MODE_NODES = {'mapping': ('slam_toolbox',), 'localization': ('amcl',), 'navigation': ('bt_navigator', 'go2w_cmd_bridge')}
 START_TIMEOUT = 90.0
@@ -115,6 +122,25 @@ COSTMAP_REFILL = 1.5   # s：清完代价地图后等障碍层按当前点云重
 INIT_COV_XY, INIT_COV_YAW = 0.25, 0.06853891945200942
 # 重定位微调（网页「应用到 AMCL」）：用户已经对准了，σ 取 5 cm / 2°，粒子不撒开
 FINE_COV_XY, FINE_COV_YAW = 0.05 ** 2, math.radians(2) ** 2
+# 自动定位（globloc.py，子进程跑）：用最近 AUTOLOC_SCANS 帧 scan（机器人静止时叠在一起）在整张地图上搜。
+# 定位 / 导航档位启动完成后自动跑一次（GO2W_AUTO_LOCALIZE=0 关掉）；网页「自动定位」按钮随时可以再跑
+AUTOLOC_SCANS = 5
+AUTOLOC_STILL = (0.03, 0.05)   # 静止判定：|v| < 0.03 m/s 且 |wz| < 0.05 rad/s
+AUTOLOC_TIMEOUT = 60.0
+AUTOLOC_ON_START = os.environ.get('GO2W_AUTO_LOCALIZE', '1') != '0'
+# 刚站起来（策略刚接管）机身还在晃，雷达高度也和趴着时不一样：策略 ready 后再稳这么久，只用这之后的 scan
+AUTOLOC_SETTLE = 2.0
+AUTOLOC_SETTLE_WAIT = 15.0   # s：最多等这么久机器人站稳、静止，等不到就报失败
+# 运控（go2w_ctrl）站起 / 趴下，见 robot_ctrl.py。GO2W_CTRL=0 关掉（不查站没站起来，也不自动趴下）
+CTRL_ON = os.environ.get('GO2W_CTRL', '1') != '0'
+CTRL_STALE = 2.0       # s：状态 topic 10 Hz，超过这么久没收到就当不知道
+CTRL_WAIT = 3.0        # s：每一步切换（插值走完之后）最多等这么久，和同事的 sport_cli up 一致
+CTRL_INTERP = 2.0      # s：FixStand 从趴姿插值到站姿的时间（config.yaml 的 ts 末项）
+CTRL_RESEND = 0.5      # s：请求还没被接受就重发（运控 0.2 s 后作废没取走的请求，DDS 也可能丢）
+# 网页站起来（或跑过任务）的机器狗，空闲这么久就原地趴下；0 = 不自动趴下
+IDLE_LIE = float(os.environ.get('GO2W_IDLE_LIE', '30'))
+PREP_HOLD_TTL = 5.0    # s：网页自检进行中每 2 s 发一次 prep_hold，期间不算空闲
+STILL_V, STILL_W = 0.05, 0.1   # 趴下前要求里程计速度低于这些（m/s、rad/s）
 # 行为树里表示「在做恢复」的节点
 RECOVERY_NODES = ('Spin', 'BackUp', 'Wait', 'DriveOnHeading')
 ACTIVE = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING, GoalStatus.STATUS_CANCELING)
@@ -123,6 +149,28 @@ RESULT = {GoalStatus.STATUS_SUCCEEDED: 'succeeded', GoalStatus.STATUS_CANCELED: 
 
 def yaw_of(q):
     return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+class StuckWatch:
+    """导航中机器人一直停在原地（位置、朝向都基本没变）就报一次；动起来或任务结束后重新计时。"""
+    def __init__(self, seconds=STUCK_SECONDS, move=STUCK_MOVE, turn=STUCK_TURN):
+        self.seconds, self.move, self.turn = seconds, move, turn
+        self.anchor, self.fired = None, False
+
+    def update(self, now, pose, active):
+        """pose = odom 下的 (x, y, yaw) 或 None。刚判定卡住时返回已经停了多少秒，其余时候返回 None。"""
+        if not active or pose is None:
+            self.anchor, self.fired = None, False
+            return None
+        a = self.anchor
+        if (a is None or math.hypot(pose[0] - a[0], pose[1] - a[1]) > self.move
+                or abs(math.atan2(math.sin(pose[2] - a[2]), math.cos(pose[2] - a[2]))) > self.turn):
+            self.anchor, self.fired = (pose[0], pose[1], pose[2], now), False
+            return None
+        if not self.fired and now - a[3] >= self.seconds:
+            self.fired = True
+            return now - a[3]
+        return None
 
 
 def pack(kind, meta, payload=b''):
@@ -285,13 +333,17 @@ class Bridge(Node):
         self.create_timer(0.1, self.run_ros_ops)
 
         self.map_blob, self.map_ver = None, 0
-        self.near_occ = None     # 地图障碍物膨胀 MATCH_TOL 后的布尔栅格，算匹配率用
+        self.map_file = None     # 网页上显示的是 data/maps 里直接读的哪张图（导航没开时）；None = 来自 /map
+        self.near_occ = None    # 地图障碍物膨胀 MATCH_TOL 后的布尔栅格，算匹配率用
         self.map_info = None
         self.map_loaded = None   # 网页「切换地图」最近加载的地图名（map_server 重启后作废）
         self.amcl = None         # (位置 σ m, 航向 σ °, 收到时间)
         self.match = None        # scan / map 匹配率 %，平滑过
         self.scan_blob, self.scan_ver = None, 0
+        self.map_raw = None      # 自动定位用：(OccupancyGrid 原始 int8 栅格 h×w, res, ox, oy)
+        self.scans_base = deque(maxlen=AUTOLOC_SCANS)   # 自动定位用：(收到时间, base_footprint 下的 N×2 点, 收到时是否静止)
         self.odom = None
+        self.odom_pose = None    # (x, y, yaw, 收到时间)，odom 坐标系；卡住检测用
         self.speed = SpeedCheck()
         self.rate_warned = 0.0
         self.healthy, self.healthy_t = None, 0.0
@@ -370,6 +422,7 @@ class Bridge(Node):
                 'ox': info.origin.position.x, 'oy': info.origin.position.y,
                 'oyaw': yaw_of(info.origin.orientation), 'frame': m.header.frame_id}
         self.map_blob = pack(T_MAP, meta, zlib.compress(grid.astype(np.uint8).tobytes(), 6))
+        self.map_file = None
         occ = (grid >= 65) & (grid != 255)
         occ = occ.reshape(info.height, info.width)
         near = occ.copy()
@@ -378,11 +431,29 @@ class Bridge(Node):
             n2[1:, :] |= near[:-1, :]; n2[:-1, :] |= near[1:, :]; n2[:, 1:] |= near[:, :-1]; n2[:, :-1] |= near[:, 1:]
             near = n2
         self.near_occ, self.map_info = near, (info.resolution, info.origin.position.x, info.origin.position.y, info.width, info.height)
+        if abs(yaw_of(info.origin.orientation)) < 1e-6:   # 自动定位只支持不旋转的地图原点（slam_toolbox / map_server 都是）
+            self.map_raw = (np.asarray(m.data, dtype=np.int8).reshape(info.height, info.width),
+                            info.resolution, info.origin.position.x, info.origin.position.y)
+        else:
+            self.map_raw = None
         self.map_ver += 1
         self.get_logger().info(f'map {info.width}x{info.height} @ {info.resolution:.3f} m')
 
+    def show_file_map(self, name, m):
+        """没有 map_server / slam_toolbox 时，直接显示 data/maps 里的地图（mapfile.load 的结果）。
+        只给网页看、选点编辑路线；定位相关的东西（匹配率、自动定位用的栅格）只认 /map。"""
+        grid = m['grid'].astype(np.int16)
+        grid[grid < 0] = 255
+        h, w = grid.shape
+        meta = {'w': w, 'h': h, 'res': m['res'], 'ox': m['ox'], 'oy': m['oy'], 'oyaw': m['oyaw'], 'frame': 'map'}
+        self.map_blob = pack(T_MAP, meta, zlib.compress(grid.astype(np.uint8).tobytes(), 6))
+        self.map_file = name
+        self.map_ver += 1
+        self.get_logger().info(f'map {name} {w}x{h} @ {m["res"]:.3f} m（文件，导航没开）')
+
     def on_scan(self, m):
         self.rates['/scan'].tick()
+        self.keep_scan_base(m)
         tfm = self.lookup(m.header.frame_id)
         if tfm is None:
             return
@@ -405,6 +476,25 @@ class Bridge(Node):
             if inside.sum() >= 20:
                 pct = 100.0 * self.near_occ[gy[inside], gx[inside]].mean()
                 self.match = pct if self.match is None else 0.8 * self.match + 0.2 * pct
+
+    def keep_scan_base(self, m):
+        """自动定位用：把 scan 转到 base_footprint 存下来（和地图坐标系无关，定位错了也能用）。"""
+        if m.header.frame_id in ('', BASE_FRAME):
+            tx = ty = th = 0.0
+        else:
+            try:
+                tr = self.tf.lookup_transform(BASE_FRAME, m.header.frame_id, rclpy.time.Time()).transform
+            except Exception:
+                return
+            tx, ty, th = tr.translation.x, tr.translation.y, yaw_of(tr.rotation)
+        r = np.asarray(m.ranges, dtype=np.float32)
+        a = m.angle_min + np.arange(r.size, dtype=np.float32) * m.angle_increment + th
+        ok = np.isfinite(r) & (r >= max(m.range_min, 0.45)) & (r <= min(m.range_max, 20.0))
+        r, a = r[ok], a[ok]
+        # 只叠加静止时的帧：原地转动时几帧叠在一起会糊掉（11-10 用 bag 测到过）
+        v = self.odom or (0.0, 0.0, 0.0)
+        still = math.hypot(v[0], v[1]) < AUTOLOC_STILL[0] and abs(v[2]) < AUTOLOC_STILL[1]
+        self.scans_base.append((time.monotonic(), np.stack([tx + r * np.cos(a), ty + r * np.sin(a)], 1), still))
 
     def on_amcl(self, m):
         c = m.pose.covariance
@@ -607,6 +697,7 @@ class Bridge(Node):
         t = m.twist.twist
         self.odom = (t.linear.x, t.linear.y, t.angular.z)
         p, st = m.pose.pose, m.header.stamp
+        self.odom_pose = (p.position.x, p.position.y, yaw_of(p.orientation), time.monotonic())
         self.speed.add(time.monotonic(), st.sec + st.nanosec * 1e-9, p.position.x, p.position.y, yaw_of(p.orientation))
 
     def on_healthy(self, m):
@@ -913,12 +1004,23 @@ class Server:
         self.bridge_t, self.bridge_started = -1e9, False   # 遥控用独立速度桥：上次启动时间、是否由网页启动过
         self.busy = False             # 同一时间只做一个启停操作
         self.map_choice = None        # 没有定位 / 导航在跑时，网页选好的「下次启动用的地图」
+        # 最近用过 / 选过的地图（data/last_map.json）：导航没开时网页显示它，重启后也记得
+        self.last_map_file = os.path.join(DATA, 'last_map.json')
+        self.last_map = None
+        try:
+            with open(self.last_map_file, encoding='utf-8') as f:
+                v = json.load(f).get('name')
+            self.last_map = v if isinstance(v, str) and P.SAFE_NAME.fullmatch(v) else None
+        except (OSError, ValueError, AttributeError):
+            pass
+        self.preview_key = None       # 已经显示的文件地图 (名字, 修改时间)；导航 / 建图在跑时为 None
         self.map_busy = False         # 保存和导出地图期间保护源快照及目标文件
         self.teleop = None            # (vx, vy, wz, 收到时间)；None = 没有在遥控
         self.maps = P.list_maps(os.path.join(DATA, 'maps'))
         self.bags = P.list_bags(os.path.join(DATA, 'bags'))
         self.rollback_file = os.path.join(DATA, 'rollback.json')
         self.rollback_on, self.rollback_t, self.rollback_started, self.rollback_saving = True, 0.0, False, False
+        self.stuck, self.stuck_t = StuckWatch(), -STUCK_COOLDOWN
         self.quota_warned = False     # 超限又删不动时只报一次警，回到上限以下再复位
         try:
             with open(self.rollback_file) as f:
@@ -959,6 +1061,25 @@ class Server:
             node.event('WARN', f'无法读取地图显示方向 {self.views_file}，全部按 0° 显示：{e}')
         self.map_loading = False
         self.checking_route = False
+        # 自动定位：最近一次的结果推给网页（state.autoLoc）；seq 每次结束 +1，网页据此知道「刚定位成功」
+        self.autoloc = {'state': 'idle', 'seq': 0}
+        self.autoloc_busy = False
+        self.pose_set_t = 0.0   # 最近一次（手动或自动）设置初始位姿的时间；启动后自动定位前用户已经手动给了就不再覆盖
+        # 运控：站起 / 趴下（robot_ctrl.py）
+        self.ctrl = None
+        if CTRL_ON:
+            try:
+                self.ctrl = R.CtrlLink(node, node.event, fake=self.simulated)
+            except Exception as e:
+                node.event('ERROR', f'无法连接运控状态（域 0）：{e!r}；站起 / 趴下不可用')
+        self.ctrl_op = None        # 'up' / 'down'：正在站起 / 趴下
+        self.ctrl_abort = False    # 站起过程中被要求趴下
+        self.ctrl_msg = ''         # 最近一次站起 / 趴下的结果
+        self.stood_seq = 0         # 从趴着站起来的次数：网页据此作废定位（站起来时雷达位姿变了，要重新定位）
+        self.auto_lie = False      # 空闲自动趴下生效（网页站起来过或跑过任务；遥控器站起来的不管）
+        self.stand_hold = False    # 网页点了「保持站立」：不自动趴下，直到下次出发或手动趴下
+        self.idle_since = None     # 开始空闲的时间
+        self.prep_hold_t = -1e9    # 网页自检最近一次说「我在自检」的时间
 
     # ---------- 工具 ----------
     def aw(self, fut, timeout=3.0):
@@ -1033,9 +1154,9 @@ class Server:
             return False, '地图正在保存或对齐，请稍等'
         if ws.closed or ws not in self.clients:
             return False, '网页已断开'
-        if self.checking_route and op in ('goal', 'initial_pose', 'route_start'):
+        if self.checking_route and op in ('goal', 'initial_pose', 'route_start', 'auto_localize'):
             return False, '正在检查路线，请稍等'
-        if self.route_running() and (op in ('goal', 'initial_pose')
+        if self.route_running() and (op in ('goal', 'initial_pose', 'auto_localize')
                                      or (op == 'arm' and d.get('on'))):
             return False, '多点任务进行中：请先取消任务'
         if op in ('goal', 'arm', 'cancel', 'estop'):
@@ -1055,14 +1176,34 @@ class Server:
                     return False, '定位（AMCL）没有运行，无法设置初始位姿'
                 fine = d.get('cov') == 'fine'
                 n.publish_initial_pose(d['x'], d['y'], d['th'], fine)
+                self.pose_set_t = time.monotonic()
                 n.event('INFO', f"{'重定位微调' if fine else '初始位姿'} ({d['x']:.2f}, {d['y']:.2f}, {math.degrees(d['th']):.1f}°)（{self.remote(ws)}）")
                 # 11-09：定位错误期间（启动时 AMCL 默认在地图原点）雷达标的障碍会落在错误位置，
                 # 机器人脚下的盲区又擦不掉 → 规划报「起点在障碍物里」。改位姿后清一次代价地图
                 asyncio.ensure_future(self.clear_after_pose())
                 return True, '位置已修正' if fine else '初始位姿已发布'
+            if op == 'auto_localize':
+                return await self.auto_localize(self.remote(ws))
+            if op == 'stand_up':
+                return await self.stand_up(self.remote(ws))
+            if op == 'lie_down':
+                self.owner = ws
+                return await self.lie_down(self.remote(ws))
+            if op == 'stand_hold':
+                on = bool(d.get('on'))
+                self.stand_hold, self.idle_since = on, None
+                if on:
+                    n.event('INFO', f'保持站立：不会自动趴下，直到下次出发或手动趴下（{self.remote(ws)}）')
+                return True, '保持站立，不会自动趴下' if on else '空闲后自动趴下'
+            if op == 'prep_hold':    # 网页自检进行中：别当成空闲趴下
+                self.prep_hold_t = time.monotonic()
+                return True, ''
             if op == 'goal':
                 if self.estop:
                     return False, '急停中：先解除急停'
+                reason = self.ctrl_blocker()
+                if reason:
+                    return False, reason
                 if self.prof('patrol') != 'stop':
                     return False, '命令行启动的 patrol.py 在运行：先取消导航（会连巡逻一起停）'
                 if not n.nav.server_is_ready():
@@ -1166,6 +1307,165 @@ class Server:
         except (KeyError, TypeError, ValueError) as e:
             return False, f'指令格式不对：{e!r}'
 
+    # ---------- 运控：站起 / 趴下（robot_ctrl.py） ----------
+    # 站起 = 1004（Passive → FixStand，插值 2 s）→ 等站稳 → 1002（FixStand → Velocity，策略接管）→ 等 ready。
+    # 趴下 = 1005（直接卸力塌下）。网页站起来（或跑过任务）后，空闲 IDLE_LIE 秒就原地趴下。
+    def ctrl_get(self):
+        return self.ctrl.get(CTRL_STALE) if self.ctrl else (None, False, -1)
+
+    def ctrl_blocker(self):
+        """导航能不能让机器狗动：要在策略（Velocity）里。没接运控（GO2W_CTRL=0）时不拦。"""
+        if self.ctrl is None:
+            return None
+        s, ready, _ = self.ctrl_get()
+        if s is None:
+            return '收不到运控状态（/go2w_ctrl/state）：go2w-ctrl.service 没在运行？'
+        if s != 'Velocity' or not ready:
+            return f'机器狗没有站起来（运控状态 {s}）'
+        return None
+
+    def moving(self):
+        n = self.node
+        v, p = n.odom, n.odom_pose
+        if v is None or p is None or time.monotonic() - p[3] > STALE:
+            return False   # 没有里程计（导航没开）：不知道，按静止算
+        return abs(v[0]) > STILL_V or abs(v[1]) > STILL_V or abs(v[2]) > STILL_W
+
+    async def ctrl_switch(self, api, src, dst, timeout, need_ready=True):
+        """在 src（元组）里时发 api（need_ready：还要等 src 的 ready），直到 dst 且 ready。返回 None 或失败原因。"""
+        t0, sent = time.monotonic(), -1e9
+        while True:
+            if self.ctrl_abort and api != R.API_STANDDOWN:
+                return '被「趴下」打断'
+            s, ready, _ = self.ctrl_get()
+            if s is None:
+                return '收不到运控状态'
+            if s == dst:
+                if ready:
+                    return None
+            elif s not in src:
+                return f'运控状态变成了 {s}'
+            elif (ready or not need_ready) and time.monotonic() - sent > CTRL_RESEND:
+                self.ctrl.send(api)
+                sent = time.monotonic()
+            if time.monotonic() - t0 > timeout:
+                return f'{timeout:.0f} s 内没有完成（运控状态 {s}{"" if ready else "，未就绪"}）'
+            await asyncio.sleep(0.05)
+
+    def ctrl_done(self, ok, msg):
+        self.ctrl_msg = msg
+        self.node.event('INFO' if ok else 'ERROR', msg)
+        return ok, msg
+
+    async def stand_up(self, who):
+        if self.ctrl is None:
+            return False, '运控接入已关闭（GO2W_CTRL=0）'
+        if self.ctrl_op:
+            return False, '正在站起 / 趴下，请稍等'
+        if self.estop:
+            return False, '急停中：先解除急停'
+        s, ready, _ = self.ctrl_get()
+        if s is None:
+            return False, '收不到运控状态（/go2w_ctrl/state）：go2w-ctrl.service 没在运行？'
+        self.auto_lie, self.stand_hold, self.idle_since = True, False, None   # 网页站起来的：空闲了自动趴下
+        if s == 'Velocity' and ready:
+            return True, '已经站好（策略运行中）'
+        if s not in R.STATES:
+            return False, f'运控状态 {s}，不能站起'
+        self.ctrl_op, self.ctrl_abort, lying = 'up', False, s == 'Passive'
+        try:
+            n = self.node
+            if lying:
+                n.event('INFO', f'站起：Passive → FixStand（{who}）')
+                err = await self.ctrl_switch(R.API_STANDUP, ('Passive',), 'FixStand', CTRL_INTERP + CTRL_WAIT)
+                if err:
+                    return self.ctrl_done(False, f'站起失败：{err}')
+            if self.estop:
+                return self.ctrl_done(False, '急停中：停在站立姿态，没有启动策略')
+            s, ready, _ = self.ctrl_get()
+            if s != 'Velocity':
+                n.event('INFO', '启动策略：FixStand → Velocity')
+                # FixStand 没站稳时运控也接受 1002，会在半站的姿态下切进策略：ctrl_switch 等 ready 才发
+                err = await self.ctrl_switch(R.API_BALANCESTAND, ('FixStand',), 'Velocity',
+                                             CTRL_WAIT + (0 if ready else CTRL_INTERP))
+                if err:
+                    return self.ctrl_done(False, f'启动策略失败：{err}')
+            if lying:
+                self.stood_seq += 1
+            return self.ctrl_done(True, '已站起，策略已接管')
+        finally:
+            self.ctrl_op = None
+
+    async def lie_down(self, who, auto=False):
+        """原地趴下。手动的先取消任务、上锁，等停稳；自动的只在空闲时触发（idle_tick）。"""
+        if self.ctrl is None:
+            return False, '运控接入已关闭（GO2W_CTRL=0）'
+        s, _, _ = self.ctrl_get()
+        if s is None:
+            return False, '收不到运控状态（/go2w_ctrl/state）：go2w-ctrl.service 没在运行？'
+        if s == 'Passive':
+            self.auto_lie = self.stand_hold = False
+            return True, '已经趴着'
+        if self.ctrl_op == 'down':
+            return False, '正在趴下'
+        self.ctrl_abort = True                 # 正在站起就打断
+        while self.ctrl_op == 'up':
+            await asyncio.sleep(0.05)
+        self.ctrl_op = 'down'
+        try:
+            n = self.node
+            if (self.route_running() or n.nav_active() or self.teleop is not None or n.is_armed()
+                    or self.prof('patrol') != 'stop'):
+                await self.disarm_and_cancel(f'趴下（{who}）')
+                if self.prof('patrol') != 'stop':
+                    await self.procs.stop_patrol()
+            t0 = time.monotonic()
+            while self.moving() and time.monotonic() - t0 < 3.0:   # 走着的时候塌下去太危险：等停稳
+                await asyncio.sleep(0.1)
+            s, _, _ = self.ctrl_get()
+            n.event('WARN', f'趴下（{who}）：{s} → Passive')
+            err = await self.ctrl_switch(R.API_STANDDOWN, ('FixStand', 'Velocity'), 'Passive', CTRL_WAIT, need_ready=False)
+            if err:
+                return self.ctrl_done(False, f'趴下失败：{err}')
+            self.auto_lie = self.stand_hold = False
+            self.idle_since = None
+            return self.ctrl_done(True, '已趴下' + ('（空闲自动）' if auto else ''))
+        finally:
+            self.ctrl_op, self.ctrl_abort = None, False
+
+    def ctrl_busy(self):
+        """有事在做，不算空闲：任务、导航、遥控、巡逻、检查、自动定位、站起趴下、档位切换、网页自检中、保持站立、还在走。"""
+        n = self.node
+        return bool(self.route_running() or self.goal_pending or n.nav_active() or self.teleop is not None
+                    or self.checking_route or self.autoloc_busy or self.ctrl_op or self.busy or self.map_loading
+                    or self.stand_hold or time.monotonic() - self.prep_hold_t < PREP_HOLD_TTL
+                    or self.prof('patrol') != 'stop' or self.moving())
+
+    def idle_tick(self):
+        if self.ctrl is None or IDLE_LIE <= 0:
+            return
+        s, _, _ = self.ctrl_get()
+        if s == 'Passive':
+            self.auto_lie = self.stand_hold = False   # 已经趴下了（不管是谁让它趴的）：下次站起来再说
+        if not self.auto_lie or s not in ('FixStand', 'Velocity') or self.ctrl_busy():
+            self.idle_since = None
+            return
+        now = time.monotonic()
+        if self.idle_since is None:
+            self.idle_since = now
+        elif now - self.idle_since >= IDLE_LIE:
+            self.idle_since = None
+            self.background(self.lie_down(f'空闲 {IDLE_LIE:.0f} s 自动', auto=True))
+
+    def ctrl_view(self):
+        if self.ctrl is None:
+            return {'on': False}
+        s, ready, seq = self.ctrl_get()
+        left = None if self.idle_since is None else max(0.0, IDLE_LIE - (time.monotonic() - self.idle_since))
+        return {'on': True, 'state': s, 'ready': ready, 'seq': seq, 'op': self.ctrl_op, 'msg': self.ctrl_msg,
+                'stood': self.stood_seq, 'auto': self.auto_lie and IDLE_LIE > 0, 'hold': self.stand_hold,
+                'lieIn': None if left is None else round(left, 1)}
+
     # ---------- 多点导航 ----------
     @staticmethod
     def route_next(n, loops, state):
@@ -1211,7 +1511,8 @@ class Server:
     def save_route(self, d):
         if self.routes_error:
             return False, '任务文件读取失败，请检查后端日志'
-        if not self.node.map_current or d.get('map') != self.node.map_current or self.map_loading or self.busy:
+        shown = self.shown_map()
+        if not shown or d.get('map') != shown or self.map_loading or self.busy:
             return False, '请在路线对应的地图上保存'
         route_id = d.get('route_id')
         if route_id is not None and route_id not in self.routes:
@@ -1302,6 +1603,9 @@ class Server:
             return '控制方网页连接已断开'
         if self.estop or not n.is_armed():
             return '急停或底盘未解锁'
+        reason = self.ctrl_blocker()
+        if reason:
+            return reason
         if self.busy or self.map_loading or self.motion_stops or self.prof('navigation') != 'run' or not n.nav.server_is_ready():
             return '导航不可用'
         if not n.healthy or time.monotonic() - n.healthy_t >= STALE or not n.lookup(BASE_FRAME) or n.fixed != 'map':
@@ -1364,6 +1668,8 @@ class Server:
         record = self.route_record({**d, 'name': '规划检查'}, None)
         if self.checking_route or self.route_running() or self.goal_pending or self.node.nav_active() or self.teleop is not None or self.prof('patrol') != 'stop':
             return False, '请先结束当前导航、巡逻、遥控或路线检查'
+        if self.prof('navigation') == 'stop':
+            return False, '导航没有运行：出发前自检时会用 Nav2 检查路径'
         if self.busy or self.map_loading or self.node.map_current != record['map'] or not self.node.planner.server_is_ready():
             return False, '当前地图的 Nav2 规划器未就绪，路线尚未验证'
         self.checking_route = True
@@ -1387,6 +1693,7 @@ class Server:
         if reason:
             return False, reason
         self.owner = ws
+        self.auto_lie, self.stand_hold = True, False   # 任务结束后空闲 IDLE_LIE 秒自动趴下
         n = len(route['points'])
         self.route = {'record': route, 'index': 0, 'status': 'active', 'started': time.monotonic(),
                       'message': '', 'stop': asyncio.Event(), 'goal': None, 'checking': True,
@@ -1399,8 +1706,25 @@ class Server:
         return True, f"开始任务：{route['name']}{how}"
 
     async def start_route_armed(self, ws, d):
-        """网页「启动导航」确认框：arm=true 时先解锁再出发；出发失败就把刚解的锁再上回去。"""
+        """网页「出发」：先把这次的速度上限（vmax / wmax，导航没开时在网页上选好的）设给 cmd_bridge，
+        arm=true 时再解锁出发；出发失败就把刚解的锁再上回去。"""
         n, armed_here = self.node, False
+        for key, top in (('vmax', 1.2), ('wmax', 1.5)):
+            v = d.get(key)
+            if v is None:
+                continue
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= top:
+                return False, f'速度上限 {key} 需要在 0–{top} 之间'
+            if n.params.get(key) is not None and abs(n.params[key] - v) < 1e-6:
+                continue
+            if not n.pset_cli.service_is_ready():
+                return False, 'cmd_bridge 没有运行，无法设置速度上限'
+            r = await self.aw(n.set_param(key, v), 2.0)
+            res = r.results[0]
+            if not res.successful:
+                return False, f'速度上限没有生效：{res.reason}'
+            n.params[key] = float(v)
+            n.event('INFO', f'{BRIDGE} {PARAMS[key]} = {float(v):.2f}（出发前）')
         if d.get('arm') and not n.is_armed():
             if self.estop:
                 return False, '急停中：先解除急停'
@@ -1443,6 +1767,143 @@ class Server:
             n.event('INFO', '位姿已更新，已清除代价地图里的旧障碍标记')
         except Exception as e:
             n.event('WARN', f'设置位姿后清除代价地图没有完成：{e!r}')
+
+    # ---------- 自动定位 ----------
+    async def auto_localize(self, who, on_start=False):
+        """用最近几帧 scan 在整张地图上找机器人（globloc.py 子进程），可信就发给 AMCL。
+
+        返回 (ok, 提示, 结果)。不可信（分数低 / 有歧义）时不发位姿，只报告，让人手动给。
+        机器人必须静止；导航目标执行中拒绝（定位跳变会让正在跑的规划失效）。
+        """
+        n = self.node
+        if self.autoloc_busy:
+            return False, '自动定位正在进行'
+        if 'amcl' not in n.get_node_names():
+            return False, '定位（AMCL）没有运行，无法自动定位'
+        if n.nav_active():
+            return False, '导航进行中：先取消导航再自动定位'
+        if n.map_raw is None:
+            return False, '还没有收到地图（或地图原点带旋转，暂不支持）'
+        self.autoloc_busy = True
+        self.autoloc = {'state': 'run', 'seq': self.autoloc['seq'], 'map': n.map_current}
+        path = None
+        try:
+            # 先等站稳、静止（11-12：站起来后立刻定位总报「机器人在动」，自检卡住）
+            scans, why, w0 = None, '', time.monotonic()
+            while time.monotonic() - w0 < AUTOLOC_SETTLE_WAIT:
+                scans, why = self.autoloc_scans()
+                if scans is not None:
+                    break
+                await asyncio.sleep(0.2)
+            if scans is None:
+                raise RuntimeError(f'{AUTOLOC_SETTLE_WAIT:.0f} s 内没等到机器人站稳静止（{why}）')
+            if n.map_raw is None:
+                raise RuntimeError('地图没有了')
+            grid, res, ox, oy = n.map_raw
+            map_name, map_ver = n.map_current, n.map_ver
+            self.autoloc['map'] = map_name
+            t0 = time.monotonic()
+            fd, path = tempfile.mkstemp(prefix='go2w_autoloc_', suffix='.npz')
+            os.close(fd)
+            np.savez(path, grid=grid, res=res, origin=np.array([ox, oy]), pts=np.concatenate(scans).astype(np.float32))
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'globloc.py')
+            # nice：别和 FAST-LIO / AMCL 抢 CPU
+            proc = await asyncio.create_subprocess_exec('nice', '-n', '10', 'python3', script, path,
+                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), AUTOLOC_TIMEOUT)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise RuntimeError(f'{AUTOLOC_TIMEOUT:.0f} s 内没有算完')
+            if proc.returncode != 0:
+                lines = err.decode(errors='replace').strip().splitlines()
+                raise RuntimeError(lines[-1] if lines else f'退出码 {proc.returncode}')
+            r = json.loads(out.decode().strip().splitlines()[-1])
+            if 'error' in r:
+                raise RuntimeError(r['error'])
+        except Exception as e:
+            msg = f'自动定位失败：{e}'
+            self.autoloc = {'state': 'fail', 'seq': self.autoloc['seq'] + 1, 'map': n.map_current, 'msg': msg}
+            n.event('ERROR', msg)
+            return False, msg
+        finally:
+            self.autoloc_busy = False
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        took = time.monotonic() - t0
+        map_name = n.map_current or map_name
+        where = f"({r['x']:.2f}, {r['y']:.2f}, {math.degrees(r['th']):.0f}°)"
+        quality = f"分数 {r['score']:.2f}，次优/最优 {r['ratio']:.2f}，{took:.1f} s"
+        res_ = {k: r[k] for k in ('x', 'y', 'th', 'score', 'ratio', 'second_pose')}
+        # 只看栅格本身：启动时地图名（map_current）比栅格晚几秒才拿到，map_server 也可能重发同一张图
+        now_raw = n.map_raw
+        if n.map_ver != map_ver and (now_raw is None or now_raw[1:] != (res, ox, oy) or not np.array_equal(now_raw[0], grid)):
+            msg = '自动定位期间地图变了，结果作废'
+            self.autoloc = {'state': 'fail', 'seq': self.autoloc['seq'] + 1, 'map': map_name, 'msg': msg}
+            n.event('WARN', msg)
+            return False, msg
+        if on_start and self.pose_set_t > t0:   # 算的时候用户已经手动给了位置：以手动为准
+            self.autoloc = {'state': 'idle', 'seq': self.autoloc['seq']}
+            n.event('INFO', f'自动定位结果 {where} 没有使用：期间已手动设置了初始位姿')
+            return False, '期间已手动设置初始位姿'
+        if not r['ok']:
+            why = '匹配分数太低（不在这张地图上，或环境变化太大）' if r['score'] < 0.75 else '有多个相似位置，分不清'
+            msg = f'自动定位不可信，没有使用：{why}。最佳 {where}，{quality}。请手动给初始位置'
+            self.autoloc = {'state': 'fail', 'seq': self.autoloc['seq'] + 1, 'map': map_name, 'msg': msg, **res_}
+            n.event('WARN', msg)
+            return False, msg, res_
+        n.publish_initial_pose(r['x'], r['y'], r['th'], fine=True)
+        self.pose_set_t = time.monotonic()
+        msg = f'自动定位成功 {where}（{quality}）'
+        self.autoloc = {'state': 'ok', 'seq': self.autoloc['seq'] + 1, 'map': map_name, 'msg': msg, **res_}
+        n.event('INFO', f'{msg}（{who}）')
+        asyncio.ensure_future(self.clear_after_pose())
+        return True, msg, res_
+
+    def autoloc_scans(self):
+        """能用来自动定位的 scan：站稳 AUTOLOC_SETTLE 秒之后收到的、静止的、最近 2 s 内的，至少 3 帧。
+        返回 (点列表, '') 或 (None, 还差什么)。"""
+        n, now = self.node, time.monotonic()
+        since = 0.0
+        if self.ctrl is not None:
+            s, ready, _ = self.ctrl_get()
+            if self.ctrl_op:
+                return None, '正在站起 / 趴下'
+            if s in ('FixStand', 'Velocity'):   # 趴着（Passive）也让定位：重定位标签里可能就是趴着在看
+                st = self.ctrl.steady_since()
+                if not ready or st is None:
+                    return None, '还没站稳'
+                if now - st < AUTOLOC_SETTLE:
+                    return None, '刚站起来，等机身稳定'
+                since = st + AUTOLOC_SETTLE
+        recent = [(p, still) for t, p, still in list(n.scans_base) if now - t < 2.0 and t >= since]
+        if len(recent) < 3:
+            return None, '激光数据不足'
+        scans = [p for p, still in recent if still]
+        if len(scans) < 3:
+            return None, '机器人在动'
+        return scans, ''
+
+    async def auto_localize_on_start(self, mode):
+        """定位 / 导航档位刚启动：等地图和 scan 到齐、机器人静止，自动定位一次。"""
+        n, t0 = self.node, time.monotonic()
+        await asyncio.sleep(2.0)   # AMCL 刚激活，scan 刚开始出
+        while time.monotonic() - t0 < 30:
+            if self.prof(mode) == 'stop' or self.pose_set_t > t0:
+                return
+            now = time.monotonic()
+            fresh = sum(1 for t, _, still in list(n.scans_base) if now - t < 2.0 and still)
+            if n.map_raw is not None and n.map_current and fresh >= 3 and 'amcl' in n.get_node_names():
+                break
+            await asyncio.sleep(1.0)
+        else:
+            n.event('WARN', '启动后 30 s 内没等到地图 / 激光，没有自动定位，请手动给初始位置')
+            return
+        n.event('INFO', f'{self.MODE_NAME[mode]}已启动，开始自动定位（机器人保持静止）')
+        await self.auto_localize('启动后自动', on_start=True)
 
     async def clear_before_start(self):
         """出发前清代价地图，再等一下让障碍层按当前点云重新标记。清不了只记日志，不拦着出发。"""
@@ -1612,7 +2073,7 @@ class Server:
             return True, f'{self.MODE_NAME[mode]}已经在运行'
         if mode in ('localization', 'navigation'):
             names = [m['name'] for m in self.maps]
-            map_name = map_name or self.map_choice or n.map_current or ('lab_20261021' if 'lab_20261021' in names else (names[0] if names else None))
+            map_name = map_name or self.default_map()
             if map_name not in names:
                 return False, 'data/maps 里没有可用的地图'
         if not cur and mode is None:
@@ -1649,6 +2110,7 @@ class Server:
                     n.event('ERROR', '遥控用的速度桥没有停掉，没有启动导航（两个速度桥不能同时跑）。可以再点一次')
                     return
             if mode:
+                self.autoloc = {'state': 'idle', 'seq': self.autoloc['seq']}   # 上一轮的自动定位结果作废
                 self.transitions[mode] = 'starting'
                 self.starting[mode] = time.monotonic()
                 await self.procs.start_mode(mode, map_name)
@@ -1666,29 +2128,27 @@ class Server:
             self.busy = False
 
     async def bag_start(self, name, topics):
-        name = name or time.strftime('web_%m%d_%H%M%S')
-        if not P.SAFE_NAME.match(name):
-            return False, '包名只能用字母、数字、下划线和减号'
+        """分段录包：每 BAG_SEGMENT 秒一个包，包名 = 前缀_MMDD_HHMMSS。name 是前缀，不填用 web。"""
+        name = name or 'web'
+        if not P.SAFE_NAME.match(name) or len(name) > 30:
+            return False, '包名前缀只能用字母、数字、下划线和减号，最多 30 个字符'
         bad = [t for t in topics if not P.SAFE_TOPIC.match(t)]
         if not topics or bad:
             return False, f"topic 写法不对：{' '.join(bad) or '（空）'}"
         if self.prof('bag') != 'stop':
             return False, '已经在录包了'
-        if any(b['name'] == name for b in self.bags):
-            return False, f'data/bags 里已经有 {name}，换个名字'
         over = await self.bag_quota()
         if over:
             return False, f'{over}：已上传的旧包删完了还是超限，先上传或手动删掉一些包再录'
         self.transitions['bag'] = 'starting'
         try:
             await self.procs.start_bag(name, topics)
-            self.bag_name = name
             await asyncio.sleep(0.3)
             await self.refresh_procs()
         finally:
             self.transitions.pop('bag', None)
-        self.node.event('INFO', f"开始录包 {name}：{' '.join(topics)}")
-        return True, f'开始录包：data/bags/{name}'
+        self.node.event('INFO', f"开始录包（每 {P.BAG_SEGMENT} 秒一个包，{name}_时间）：{' '.join(topics)}")
+        return True, f'开始录包：每 {P.BAG_SEGMENT} 秒存一个包到 data/bags/{name}_<时间>'
 
     async def bag_delete(self, name, who):
         # 删掉 data/bags/<name> 整个目录（.mcap + metadata.yaml），删了不能恢复
@@ -1777,9 +2237,12 @@ class Server:
         return over
 
     def recording_names(self):
-        # 录包中保存的回溯包（snap_ 开头）比正在录的包新，不能把它当成「最新的那个」
-        newest = next((b['name'] for b in self.bags if not b['name'].startswith('snap_')), None)
-        return {getattr(self, 'bag_name', None), newest}
+        """列表里正在写的包。网页录包是分段的：正在写的那段在 .recording 里，列表里的都已经写完，返回空。
+        命令行手动跑的 ros2 bag record 不知道名字，保险起见把最新的一个（回溯包除外）当成正在录。"""
+        if (self.procs_status or {}).get('bag_seg'):
+            return set()
+        newest = next((b['name'] for b in self.bags if not b['name'].startswith(('snap_', 'stuck_'))), None)
+        return {newest}
 
     def rollback_set(self, on, who):
         self.rollback_on = on
@@ -1834,13 +2297,40 @@ class Server:
             self.rollback_started = False
             await self.procs.stop_rollback()
 
-    async def rollback_save(self, who):
+    def stuck_tick(self):
+        """导航目标没到、狗却长时间停着不动时，自动保存一段回溯包。"""
+        n, now = self.node, time.monotonic()
+        o = n.odom_pose
+        pose = o[:3] if o and now - o[3] < STALE else None
+        active = n.nav_active() and bool(n.is_armed()) and not self.estop
+        still = self.stuck.update(now, pose, active)
+        if still is None:
+            return
+        if not (self.procs_status or {}).get('rollback'):
+            n.event('WARN', f'导航中已经 {still:.0f} 秒没动了，但回溯录制没在运行，没法自动存包')
+            return
+        if now - self.stuck_t < STUCK_COOLDOWN:
+            n.event('WARN', f'导航中已经 {still:.0f} 秒没动了（{STUCK_COOLDOWN:.0f} 秒内已自动存过包，这次不存）')
+            return
+        self.stuck_t = now
+        n.event('WARN', f'导航中已经 {still:.0f} 秒没动了，还没到目标，{STUCK_DELAY:.0f} 秒后自动保存回溯包')
+
+        async def later():
+            await asyncio.sleep(STUCK_DELAY)
+            for _ in range(10):   # 正好有人在手动保存时等它存完
+                if not self.rollback_saving:
+                    break
+                await asyncio.sleep(1.0)
+            await self.rollback_save('卡住自动保存', 'stuck_')
+        self.background(later())
+
+    async def rollback_save(self, who, prefix='snap_'):
         if not (self.procs_status or {}).get('rollback'):
             return False, '回溯录制没在运行：先打开回溯，并启动建图 / 定位 / 导航'
         if self.rollback_saving:
             return False, '正在保存上一段，请稍等'
         self.rollback_saving = True
-        name, bags_dir = time.strftime('snap_%m%d_%H%M%S'), os.path.join(DATA, 'bags')
+        name, bags_dir = time.strftime(f'{prefix}%m%d_%H%M%S'), os.path.join(DATA, 'bags')
         work = os.path.join(bags_dir, '.rollback')
         error, done = os.path.join(work, f'{name}.error'), os.path.join(bags_dir, name, 'metadata.yaml')
         try:
@@ -1991,6 +2481,9 @@ class Server:
             return False, f'data/maps 里没有 {name}'
         if not n.loadmap_cli.service_is_ready():
             self.map_choice = name
+            self.save_last_map(name)
+            if self.preview_tick():
+                return True, f'已切换到 {name}（导航启动时用这张图）'
             return True, f'下次启动定位 / 导航时用 {name}'
         if self.map_loading:
             return False, '正在切换地图'
@@ -2008,6 +2501,56 @@ class Server:
         n.event('WARN', f'已切换到地图 {name}：请重新设置初始位姿')
         return True, f'已切换到 {name}，请重新设置初始位姿'
 
+    # ---------- 导航没开时也能看地图 ----------
+    def default_map(self):
+        """启动定位 / 导航、或导航没开时显示用的地图：网页选的 > 正在用的 > 上次用的 > lab_20261021 > 最新的。"""
+        names = [m['name'] for m in self.maps]
+        for name in (self.map_choice, self.node.map_current, self.last_map, 'lab_20261021'):
+            if name in names:
+                return name
+        return names[0] if names else None
+
+    def save_last_map(self, name):
+        if not name or name == self.last_map:
+            return
+        self.last_map = name
+        try:
+            os.makedirs(DATA, exist_ok=True)
+            tmp = self.last_map_file + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'name': name}, f)
+            os.replace(tmp, self.last_map_file)
+        except OSError as e:
+            self.node.get_logger().warn(f'记不住上次用的地图：{e!r}')
+
+    def shown_map(self):
+        """网页上现在显示的地图名：导航 / 定位在跑时是 map_server 的图，没开时是直接读的文件；建图中为 None。"""
+        n = self.node
+        return n.map_file if n.map_file is not None else n.map_current
+
+    def preview_tick(self):
+        """没有任何档位在跑时，把 default_map() 从文件读出来显示（换了选择或文件改了才重读）。返回是否在显示文件地图。"""
+        n = self.node
+        names = set(n.get_node_names())
+        if any(self.prof(m) != 'stop' for m in P.MODES) or names & {'map_server', 'slam_toolbox'}:
+            self.preview_key = None
+            return False
+        name = self.default_map()
+        if not name:
+            return False
+        rec = next(m for m in self.maps if m['name'] == name)
+        key = (name, rec['mtime'])
+        if key == self.preview_key and n.map_file == name:
+            return True
+        self.preview_key = key
+        try:
+            m = mapfile.load(os.path.join(DATA, 'maps', f'{name}.yaml'))
+        except Exception as e:
+            n.event('WARN', f'读不了地图文件 {name}：{e}')
+            return False
+        n.show_file_map(name, m)
+        return True
+
     async def procs_poll(self):
         """每 2 s 查一次进程；判断启动完成 / 失败 / 超时；每 6 s 刷新地图、录包列表和当前地图。"""
         n, k = self.node, 0
@@ -2024,6 +2567,10 @@ class Server:
             except Exception as e:
                 n.get_logger().warn(f'回溯录制启停失败：{e!r}')
             try:
+                self.stuck_tick()
+            except Exception as e:
+                n.get_logger().warn(f'卡住检测失败：{e!r}')
+            try:
                 await self.bridge_tick()
             except Exception as e:
                 n.get_logger().warn(f'遥控速度桥启停失败：{e!r}')
@@ -2033,6 +2580,8 @@ class Server:
                 if all(x in names for x in MODE_NODES[m]):
                     self.starting.pop(m); self.transitions.pop(m, None)
                     n.event('INFO', f'{self.MODE_NAME[m]}已启动')
+                    if AUTOLOC_ON_START and m in ('localization', 'navigation'):
+                        self.background(self.auto_localize_on_start(m))
                 elif self.procs_status is not None and not self.procs_status.get(m) and age > 4:
                     self.starting.pop(m); self.transitions.pop(m, None)
                     n.event('ERROR', f'{self.MODE_NAME[m]}启动失败，进程退出了。data/logs/{m}.log 最后几行：\n'
@@ -2048,6 +2597,12 @@ class Server:
                     self.bags = P.list_bags(os.path.join(DATA, 'bags'))
                     n.get_logger().warn(f'录包容量检查失败：{e!r}')
                 n.fetch_map_current()
+            if n.map_current and n.map_file is None:
+                self.save_last_map(n.map_current)
+            try:
+                self.preview_tick()
+            except Exception as e:
+                n.get_logger().warn(f'显示地图文件失败：{e!r}')
             await asyncio.sleep(2.0)
 
     # ---------- 键盘遥控 ----------
@@ -2193,6 +2748,13 @@ class Server:
                     reason = self.route_blocker(self.owner, self.route['record'])
                     if reason:
                         await self.disarm_and_cancel(reason)
+                elif k % 2 == 0 and n.nav_active() and self.ctrl_op != 'down':
+                    # 单个导航目标 / 巡逻中机器狗掉进 Passive（遥控器 LT+B、摔倒保护）：取消，别让 Nav2 对着趴着的狗一直发速度
+                    s, _, _ = self.ctrl_get()
+                    if s is not None and s != 'Velocity':
+                        await self.disarm_and_cancel(f'机器狗不在行走状态（运控状态 {s}）')
+                if k % 5 == 0:
+                    self.idle_tick()
                 # 急停期间底盘被别处解锁（nav.sh arm 等）→ 再次上锁。
                 # 只认急停 1 s 之后收到的「已解锁」，避免把上锁之前的旧状态当成又被解锁
                 if self.estop and n.is_armed() and n.armed_t > self.estop_t + 1.0 and k % 5 == 0:
@@ -2239,9 +2801,13 @@ class Server:
                     await self.send_all(json.dumps({'t': 'logs', 'items': items}))
                 if k % 10 == 0:  # 状态 2 Hz
                     st = n.state(self.sys.read(), self.procs_status, self.transitions)
+                    # mapCurrent = 网页上显示的地图（导航没开时是文件地图）；mapLive = 它来自 map_server，可以定位 / 规划
+                    st.update(mapCurrent=self.shown_map(), mapLive=n.map_file is None and n.map_current is not None)
                     st.update(estop=self.estop, busy=self.busy, mapBusy=self.map_busy, maps=self.maps, bags=self.bags, uploads=self.uploads, mapChoice=self.map_choice,
                               rollback={'on': self.rollback_on, 'run': bool((self.procs_status or {}).get('rollback')), 'saving': self.rollback_saving, 'seconds': ROLLBACK_SECONDS},
-                              procsKnown=self.procs_status is not None, teleop=self.teleop is not None)
+                              procsKnown=self.procs_status is not None, teleop=self.teleop is not None, autoLoc=self.autoloc, ctrl=self.ctrl_view(),
+                              bagLive=sorted(n for n in self.recording_names() if n) if self.prof('bag') != 'stop' else [],
+                              bagSegment=P.BAG_SEGMENT if (self.procs_status or {}).get('bag_seg') else None)
                     await self.send_all(json.dumps(st))
                 # topic 查看器：只发给正在看这个 topic 的网页
                 for topic, rec in list(n.inspect.items()):

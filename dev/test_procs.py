@@ -3,7 +3,7 @@
 
 本地模拟器用 FakeProcs，绕过了这些脚本；这里验证 API 调用格式、pgrep 位掩码、pkill 流程和超时。
 pgrep / pkill 的目标是本测试自己起的假进程，脚本里写 /go2w 的命令不测。
-运行：python dev/test_procs.py（需要 aiohttp）
+运行：python web/dev/test_procs.py（需要 aiohttp）
 """
 import asyncio, os, subprocess, sys, tempfile, uuid
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'server'))
@@ -51,6 +51,9 @@ async def main():
     st = await d.status(); check('识别录包', st['bag'], st)
     await d.stop_bag(); await asyncio.sleep(0.2); check('stop_bag 停掉录包', bag.poll() is not None, bag.poll())
     check('stop_bag 不影响导航', nav.poll() is None)
+    seg = fake(['/go2w/scripts/segment_recorder.py', '--prefix', 'web', '/odom']); await asyncio.sleep(0.2)
+    st = await d.status(); check('识别分段录包', st['bag'], st)
+    await d.stop_bag(); await asyncio.sleep(0.2); check('stop_bag 停掉分段录包', seg.poll() is not None, seg.poll())
     await d.stop_patrol(); await asyncio.sleep(0.2); check('stop_patrol 停掉巡逻', pat.poll() is not None)
     check('stop_patrol 不影响导航', nav.poll() is None)
     ok = await d.stop_modes(); await asyncio.sleep(0.2); check('stop_modes 停掉 launch 并报告成功', ok and nav.poll() is not None, (ok, nav.poll()))

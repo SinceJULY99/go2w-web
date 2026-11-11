@@ -20,7 +20,11 @@ ENV = 'source /go2w/docker/ros_env.sh >/dev/null 2>&1; '
 LOGS = '/go2w/data/logs'
 # 各档位的 launch 进程（[x] 写法让 pgrep / pkill 不匹配到自己的命令行）
 LAUNCH = {m: f'[r]os2 launch go2w_bringup {m}.launch.py' for m in MODES}
-PATROL, BAG, ROLLBACK = '[p]atrol.py', '[r]os2 bag record', '[r]ollback_recorder.py'
+PATROL, ROLLBACK = '[p]atrol.py', '[r]ollback_recorder.py'
+# 网页录包用分段录包进程；命令行手动跑的 ros2 bag record（nav.sh）也算在录包里
+BAG_SEG = '[s]egment_recorder.py'
+BAG = f'{BAG_SEG}|[r]os2 bag record'
+BAG_SEGMENT = 30   # 网页录包每个包的秒数
 # 不开导航时给网页遥控用的独立速度桥（导航档自带一个，两者不能同时跑）
 BRIDGE = '[r]os2 launch go2w_bringup control.launch.py'
 # 回溯录制的 topic：网页默认录包列表 + MID360 原始点云和 IMU
@@ -77,10 +81,10 @@ class DockerProcs:
     # ---------- 高层操作 ----------
     async def status(self):
         """哪些进程在跑：一次 exec，用退出码的各个位表示。"""
-        checks = [*(LAUNCH[m] for m in MODES), PATROL, BAG, ROLLBACK, BRIDGE]
+        checks = [*(LAUNCH[m] for m in MODES), PATROL, BAG, ROLLBACK, BRIDGE, BAG_SEG]
         script = 'r=0; ' + ' '.join(f'pgrep -f "{p}" >/dev/null && r=$((r|{1 << i}));' for i, p in enumerate(checks)) + ' exit $r'
         code = await self.run(script, 5.0)
-        keys = [*MODES, 'patrol', 'bag', 'rollback', 'bridge']
+        keys = [*MODES, 'patrol', 'bag', 'rollback', 'bridge', 'bag_seg']   # bag_seg：录包是网页的分段录包
         return {k: bool(code & (1 << i)) for i, k in enumerate(keys)}
 
     async def start_mode(self, mode, map_yaml=None):
@@ -116,13 +120,16 @@ class DockerProcs:
     async def stop_patrol(self):
         await self.run(f'pkill -INT -f "{PATROL}"; exit 0', 5.0)
 
-    async def start_bag(self, name, topics):
-        assert SAFE_NAME.match(name) and topics and all(SAFE_TOPIC.match(t) for t in topics)
+    async def start_bag(self, prefix, topics, seconds=BAG_SEGMENT):
+        """分段录包：每 seconds 秒一个包，包名 = 前缀_MMDD_HHMMSS（这一段的开始时间）。"""
+        assert SAFE_NAME.match(prefix) and topics and all(SAFE_TOPIC.match(t) for t in topics)
         await self.spawn(f'mkdir -p /go2w/data/bags {LOGS}; chown -R 1000:1000 /go2w/data; '
-                         f'exec ros2 bag record -s mcap -o /go2w/data/bags/{name} {" ".join(topics)} > {LOGS}/bag_{name}.log 2>&1')
+                         f'exec python3 /go2w/scripts/segment_recorder.py --seconds {float(seconds)} --prefix {prefix} '
+                         f'{" ".join(topics)} > {LOGS}/bag_{prefix}_$(date +%m%d_%H%M%S).log 2>&1')
 
     async def stop_bag(self):
-        await self.run(f'pkill -INT -f "{BAG}"; for i in $(seq 1 20); do pgrep -f "{BAG}" >/dev/null || break; sleep 0.5; done; '
+        # 分段录包收到 SIGINT 会把当前这段写完再退出（大包可能要几秒）
+        await self.run(f'pkill -INT -f "{BAG}"; for i in $(seq 1 30); do pgrep -f "{BAG}" >/dev/null || break; sleep 0.5; done; '
                        f'chown -R 1000:1000 /go2w/data/bags; exit 0', 15.0)
 
     async def start_rollback(self, seconds):

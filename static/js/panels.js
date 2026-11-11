@@ -14,7 +14,7 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
 
   /* ---------- 日志 ---------- */
   const logs = []; let logFilter = 'ALL';
-  const logEl = $('#pLogs');
+  const logEl = $('#logBox');
   function appendLog(l){
     const r = document.createElement('div'); r.className = 'lrow ' + l.level;
     r.innerHTML = `<span class="lt">${l.t}</span><span class="lv ${l.level}">${l.level}</span><span class="ln"></span><span class="lm"></span>`;
@@ -178,18 +178,51 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
   $('#armBtn').onclick = () => actions.arm();
   $('#estopBtn').onclick = () => actions.estop();
   $('#estopRelease').onclick = () => actions.releaseEstop();
-  // 滑条平时跟着实际参数走（真机上来自 cmd_bridge）；拖动中不打断，松手后发设置，失败就弹回实际值
+  // 滑条平时跟着实际参数走（真机上来自 cmd_bridge）；拖动中不打断，松手后发设置，失败就弹回实际值。
+  // cmd_bridge 没在跑（导航没开时在第 4 步选参数）：先记在滑条上（held），出发时随任务带给后端；
+  // 期间导航起来了就立刻设过去
+  const bridgeUp = () => store.source !== 'ros' || run('navigation') || run('bridge');
   const sliders = [['#slV','#oV','vmax','m/s',2], ['#slW','#oW','wmax','rad/s',1], ['#slT','#oT','tmo','s',1]].map(([id, out, key, unit, dec]) => {
     const el = $(id), show = v => $(out).textContent = `${(+v).toFixed(dec)} ${unit}`;
-    let busy = false;
+    let busy = false, held = false;
     el.oninput = () => { busy = true; show(el.value); };
-    el.onchange = () => { Promise.resolve(actions.setParam(key, +el.value)).finally(() => { busy = false; }); };
-    return () => { if (!busy && store.params[key] != null && +el.value !== store.params[key]){ el.value = store.params[key]; show(el.value); } };
+    const push = () => { busy = true; held = false; Promise.resolve(actions.setParam(key, +el.value)).finally(() => { busy = false; }); };
+    el.onchange = () => { if (bridgeUp()) push(); else { held = true; busy = false; } };
+    return () => {
+      if (held){ if (bridgeUp() && !busy) push(); return; }
+      if (!busy && store.params[key] != null && +el.value !== store.params[key]){ el.value = store.params[key]; show(el.value); }
+    };
   });
   const syncSliders = () => sliders.forEach(f => f());
 
   /* ---------- 顶栏 / HUD / 机器人卡片 ---------- */
   function chip(id, s, txt){ const c = $(id); c.dataset.s = s; c.querySelector('b').textContent = txt; }
+  // 运控姿态（store.ctrl，后端 ctrl_view）：顶栏「姿态」+ 机器人卡片上的站起 / 趴下 / 保持站立
+  const POSE = { Passive: '趴着', FixStand: '站立', Velocity: '行走' };
+  $('#poseUp').onclick = () => actions.standUp();
+  $('#poseDown').onclick = () => actions.lieDown();
+  $('#poseHold').onclick = () => actions.standHold(!store.ctrl?.hold);
+  function renderPose(){
+    const C = store.ctrl, on = !!C?.on && store.link.ok;
+    $('#chPose').hidden = $('#poseRow').hidden = !on;
+    if (!on) return;
+    const name = C.state == null ? '未知' : POSE[C.state] || String(C.state).replace(/[<>&"]/g, '');
+    const txt = C.op === 'up' ? '站起中…' : C.op === 'down' ? '趴下中…' : C.state === 'FixStand' && !C.ready ? '站起中…'
+      : C.lieIn != null ? `${Math.ceil(C.lieIn)} s 后趴下` : name;
+    chip('#chPose', C.state == null ? 'crit' : C.op || C.lieIn != null ? 'warn' : C.state === 'Velocity' ? 'ok' : '', txt);
+    const pt = $('#poseTxt');
+    pt.className = 'pose-txt' + (C.lieIn != null ? ' warn' : '');
+    pt.innerHTML = C.state == null ? '<b>收不到运控状态</b>'
+      : C.lieIn != null ? `空闲 · <b>${Math.ceil(C.lieIn)} s 后原地趴下</b>`
+      : `姿态 <b>${txt}</b>${C.hold ? ' · 保持站立' : ''}`;
+    const busy = !!C.op || C.state == null;
+    $('#poseUp').hidden = C.state === 'Velocity' && C.ready;
+    $('#poseUp').disabled = busy || store.estop;
+    $('#poseDown').hidden = C.state === 'Passive';
+    $('#poseDown').disabled = busy && C.op !== 'up';   // 站起过程中可以打断
+    $('#poseHold').hidden = !(C.lieIn != null || C.hold);
+    $('#poseHold').textContent = C.hold ? '取消保持' : '保持站立';
+  }
   function renderChips(){
     const lk = store.link, anyMode = !!actions.curMode();
     chip('#chLink', lk.ok ? (lk.ms==null ? 'warn' : lk.ms>40 ? 'warn' : 'ok') : 'crit', lk.ok ? (lk.ms==null ? '无响应' : `${lk.ms.toFixed(0)} ms`) : (ros ? '连接中' : '断开'));
@@ -202,6 +235,7 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
     else if (Lc.match!=null && Lc.match<60) chip('#chLoc', 'crit', '匹配差');
     else chip('#chLoc', 'ok', '良好');
     chip('#chOdom', store.odomOk ? 'ok' : anyMode ? 'crit' : '', store.odomOk ? '健康' : anyMode ? '不可用' : '未运行');
+    renderPose();
     chip('#chBase', store.estop ? 'crit' : store.armed==null ? '' : store.armed ? 'ok' : 'warn', store.estop ? '急停' : store.armed==null ? '--' : store.armed ? '已解锁' : '锁定');
     const sy = store.sys;
     chip('#chCpu', sy.cpu==null ? '' : sy.cpu>80 ? 'crit' : sy.cpu>60 ? 'warn' : 'ok', sy.cpu==null ? '--' : `${sy.cpu.toFixed(0)}%`);
@@ -236,19 +270,12 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
     $('#scaleBar').style.width = (m1*mapView.view.s).toFixed(0)+'px'; $('#scaleTxt').textContent = m1+' m';
   }
 
-  /* ---------- 地图与录包 ---------- */
+  /* ---------- 录包 ---------- */
   function renderMaps(){
-    // 定位 / 导航在跑：「切换」= map_server 立即加载；没在跑：「选用」= 下次启动用这张
-    const live = run('localization') || run('navigation');
-    setHTML('#mapList', store.maps.length ? store.maps.map((m,i) => {
-      const tag = m.cur ? '<span class="pill" data-s="run">当前</span>' : m.choice ? '<span class="pill" data-s="warn">启动时用</span>'
-        : `<button class="btn sm" data-m="${i}">${live || !ros ? '切换' : '选用'}</button>`;
-      return `<div class="mrow"><span class="mn">${m.name}</span><span class="mm">${m.meta}</span>${tag}</div>`; }).join('')
-      : `<div class="empty">data/maps 里没有地图</div>`);
     // 录包进行中（或正在启停）时最新的一个就是正在录的，不能删
     const bs = store.profiles.bag, recording = bs !== 'stop';
-    // 回溯包（snap_ 开头）可能比正在录的包新，不算「最新的那个」
-    const liveBag = recording ? store.bags.find(b => !b.name.startsWith('snap_'))?.name : null;
+    // 后端告诉哪些包还在写：网页录包是分段的，列表里的都已写完；命令行手动录的才把最新的一个当成在录
+    const liveBag = recording ? (store.bagLive || [])[0] ?? null : null;
     const rb = store.rollback;
     $('#rbOn').checked = rb.on;
     $('#rbState').textContent = rb.saving ? '保存中…' : rb.run ? `缓存最近 ${rb.seconds} 秒` : rb.on ? '启动建图 / 定位 / 导航后开始' : '已关闭';
@@ -264,9 +291,9 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
       return `<div class="mrow bag"><span class="mn">${b.name}</span><span class="mm">${live ? '录制中' : fmtDur(b.dur)}</span><span class="mm">${b.size>1024?(b.size/1024).toFixed(1)+' GB':b.size.toFixed(0)+' MB'}</span>${st}${up}${del}</div>`; }).join('')
       : `<div class="empty">data/bags 里没有录包</div>`);
     $('#bagBtn').textContent = bs==='run' ? '停止录包' : bs==='stop' ? '开始录包' : bs==='starting' ? '启动中…' : '停止中…';
+    $('#bagBtn').title = bs==='run' && store.bagSegment ? `正在录：每 ${store.bagSegment} 秒存一个包，包名按开始时间` : `开始后每 30 秒存一个包，包名按开始时间`;
     $('#bagBtn').disabled = bs==='starting' || bs==='stopping';
   }
-  $('#mapList').onclick = e => { const b = e.target.closest('[data-m]'); if (b) actions.loadMap(store.maps[+b.dataset.m].name); };
   $('#saveMap').onclick = () => actions.saveMap($('#mapName').value.trim() || 'map');
   $('#alignSelect').onclick = () => setTool('align');
   $('#alignHorizontal').onclick = () => mapView.alignWall('horizontal');
@@ -296,16 +323,6 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
   // 录包的 topic 列表来自输入框；运行档位里的「录包」行也用它
   store.bagTopics = $('#bagTopics').value;
   $('#bagTopics').oninput = () => { store.bagTopics = $('#bagTopics').value; };
-  // 勾选框只是往输入框里加 / 删这两个 topic，录什么始终以输入框为准
-  const LIVOX = ['/livox/lidar', '/livox/imu'], bagWords = () => $('#bagTopics').value.trim().split(/\s+/).filter(Boolean);
-  const syncLivox = () => { const w = bagWords(); $('#bagLivox').checked = LIVOX.every(t => w.includes(t)); };
-  $('#bagLivox').onchange = () => {
-    const ta = $('#bagTopics'), on = $('#bagLivox').checked;
-    if (on) { const miss = LIVOX.filter(t => !bagWords().includes(t)); if (miss.length) ta.value = ta.value.replace(/\s*$/, '\n' + miss.join(' ')); }
-    else ta.value = ta.value.split('\n').map(l => l.split(/\s+/).filter(t => t && !LIVOX.includes(t)).join(' ')).filter(Boolean).join('\n');
-    store.bagTopics = ta.value;
-  };
-  $('#bagTopics').addEventListener('input', syncLivox); syncLivox();
   $('#bagBtn').onclick = () => actions.toggle('bag');
   $('#rbOn').onchange = e => actions.setRollback(e.target.checked);
   $('#rbSave').onclick = () => actions.saveRollback();

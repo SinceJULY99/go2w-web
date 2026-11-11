@@ -17,6 +17,11 @@ export function setupRouteEditor(store, actions, setTool){
 
   async function verify(draft){
     if (store.routeCheck?.pending) return;
+    // 导航没开（只是在文件地图上编辑）：没有 Nav2 可问，出发前自检时再检查
+    if (store.source === 'ros' && store.profiles.navigation !== 'run'){
+      store.routeCheck = { draft, pending:false, message:'导航没开：出发前自检时会用 Nav2 检查站间路径' };
+      return render();
+    }
     const preview = { draft, pending:true };
     store.routeCheck = preview;
     render();
@@ -40,7 +45,7 @@ export function setupRouteEditor(store, actions, setTool){
     starting = true;
     render();
     try {
-      await actions.startRoute(route, { roundTrip: round.checked, loops: readLoops() });
+      await actions.startRoute(route, { roundTrip: round.checked, loops: readLoops(), vmax: +$('#slV').value, wmax: +$('#slW').value });
     } finally {
       starting = false;
       render();
@@ -164,7 +169,7 @@ export function setupRouteEditor(store, actions, setTool){
     confirm.hidden = draft.confirmed;
     confirm.disabled = !matching || draft.points.length < 2;
     check.hidden = !draft.confirmed;
-    check.disabled = !matching || running || !!preview?.pending;
+    check.disabled = !matching || running || !!preview?.pending || store.profiles.navigation !== 'run';
     saveRow.hidden = !draft.confirmed;
     save.disabled = saving || !matching || !draft.confirmed || !name.value.trim();
     const runningSelected = running && !!route && store.task.routeId === route.id;
@@ -175,7 +180,7 @@ export function setupRouteEditor(store, actions, setTool){
     else if (dirty && draft.points.length) runMessage = '请先确认并保存当前路线。';
     else if (preview?.pending) runMessage = '正在检查路径，完成后可以启动。';
     run.disabled = runningSelected || starting || !!runMessage;
-    const runText = runningSelected ? '导航任务执行中' : starting ? '正在启动…' : '启动导航';
+    const runText = runningSelected ? '导航任务执行中' : starting ? '正在出发…' : '出发';
     if (run.textContent !== runText) run.textContent = runText;
     if (runHint.textContent !== runMessage) runHint.textContent = runMessage;
     let message = '用「导航点」单击加点，拖拽可指定朝向。至少选两站。';

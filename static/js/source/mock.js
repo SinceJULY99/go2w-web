@@ -55,6 +55,7 @@ export function createMockSource(store, bus){
   store.wallAt = wallMask(grid, GW, GH, RES, 0, 0);
   store.link = { ok: true, ms: 23 };
   store.armed = true; store.battery = 76; store.odo = 1284;
+  store.ctrl = { on: false };   // 纯前端模拟没有运控：自检跳过「站立」
   store.mapCurrent = store.map.name;
   const viewsKey = 'go2w.mock.mapViews';
   try { store.mapViews = JSON.parse(localStorage.getItem(viewsKey) || '{}') || {}; } catch { store.mapViews = {}; }
@@ -274,10 +275,17 @@ export function createMockSource(store, bus){
     if (id==='bag') S.bagT0 = S.t;
     if (id==='localization' || id==='navigation') Object.assign(store.loc, { std: .35, yaw: 12, match: 40 });
   }
+  // 分段录包：每 30 秒存一个包，名字按这一段的开始时间
+  function bagSegment(d){
+    if (d < .5) return;
+    const t0 = new Date(Date.now() - d*1000), p = n => String(n).padStart(2,'0');
+    store.bags.unshift({ name:`web_${p(t0.getMonth()+1)}${p(t0.getDate())}_${p(t0.getHours())}${p(t0.getMinutes())}${p(t0.getSeconds())}`, dur:d, size:d*4.6 });
+    S.bagT0 = S.t;
+  }
   function onDown(id){
     if (['mapping','localization','navigation'].includes(id)){ log('ERROR','planar_odom','FAST-LIO odometry gap > 0.5 s, /odom_healthy = false'); lock('odom unhealthy'); }
     if (id==='navigation'){ cancelTask('Goal canceled: navigation stack stopped'); lock('nav stopped'); }
-    if (id==='bag'){ const d = S.t - S.bagT0; store.bags.unshift({ name:`go2w_${new Date().toTimeString().slice(0,5).replace(':','')}`, dur:d, size:d*4.6 }); toast('录包已保存'); }
+    if (id==='bag'){ bagSegment(S.t - S.bagT0); toast('录包已保存'); }
   }
   const NODES = [['livox_lidar_publisher','雷达驱动','odom'],['fast_lio','FAST-LIO','odom'],['planar_odom','planar_odom','odom'],['pcl2scan_slam','pcl2scan','odom'],
     ['amcl','AMCL','loc'],['slam_toolbox','slam_toolbox','mapping'],['bt_navigator','Nav2','navigation'],['go2w_cmd_bridge','cmd_bridge','navigation']];
@@ -301,11 +309,17 @@ export function createMockSource(store, bus){
     store.link.ms = S.link ? clamp((store.link.ms || 23) + gauss()*2, 14, 48) : null;
     store.link.ok = S.link;
     store.odomOk = odomOk();
+    if (run('bag') && S.t - S.bagT0 >= 30) bagSegment(S.t - S.bagT0);
     store.bagSince = run('bag') ? S.t - S.bagT0 : null;
+    store.bagLive = []; store.bagSegment = run('bag') ? 30 : null;
   }
 
   /* ---------- 指令（界面已经做过前置检查和确认） ---------- */
   const cmd = {
+    standUp: () => ({ ok: true, msg: '纯前端模拟：没有运控' }),
+    lieDown: () => ({ ok: false, msg: '纯前端模拟：没有运控' }),
+    standHold: () => ({ ok: true }),
+    prepHold: () => ({ ok: true }),
     initialPose(p){ cancelTask('Goal canceled: initial pose reset'); Object.assign(R, { x:p.x, y:p.y, th:p.th, v:0, w:0, vy:0 }); store.trail = [];
       Object.assign(store.loc, { std: .4, yaw: 14, match: 38 }); amclViz(); log('INFO','amcl',`Setting pose: ${p.x.toFixed(3)} ${p.y.toFixed(3)} ${p.th.toFixed(3)}`); },
     goal(g){
@@ -351,7 +365,6 @@ export function createMockSource(store, bus){
       return { ok:true, msg:`开始上传 ${name} → 166:~/go2w_bags（模拟）` };
     },
     deleteBag(name){
-      if (run('bag') && store.bags[0]?.name === name) return { ok:false, msg:`${name} 正在录制，先停止录包再删` };
       const bags = store.bags.filter(b => b.name !== name);
       if (bags.length === store.bags.length) return { ok:false, msg:`data/bags 里没有 ${name}` };
       store.bags = bags;
@@ -371,6 +384,8 @@ export function createMockSource(store, bus){
     },
     startRoute(id, o = {}){
       const route = store.routes.find(r => r.id === id);
+      if (o.vmax != null) store.params.vmax = o.vmax;
+      if (o.wmax != null) store.params.wmax = o.wmax;
       if (o.arm && !store.estop && run('navigation')){ store.armed = true; log('INFO','go2w_cmd_bridge','ARMED (启动任务前自动解锁)'); }
       if (!route || route.map !== store.mapCurrent || !canMove() || S.keys || run('patrol') ||
           (task.type !== 'idle' && task.doneAt == null)){

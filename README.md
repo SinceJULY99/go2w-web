@@ -168,7 +168,11 @@ dev/run.sh
 
 ## 回溯录制
 
+网页「开始录包」是分段录制（主仓库的 `scripts/segment_recorder.py`，替代原来的 `ros2 bag record`）：一直录，每 30 秒存成一个独立的包，包名是这一段的开始时间 `web_<月日>_<时分秒>`（同一秒重名加 `_2`）。每一段开头都写入 `/map`、`/tf_static`、`/robot_description` 这种只发一次的 topic，任何一段单独拿出来都能回放；段与段之间不丢消息。正在写的那段在 `data/bags/.recording/`，写完才整体移进 `data/bags`，所以列表里的包都能直接上传、删除。停止录包时把当前这段写完再退出。上次异常退出没写完的段会被移成 `<名字>_unfinished`（缺 metadata.yaml，用 `ros2 bag reindex` 修复）。段长在 `procs.py` 的 `BAG_SEGMENT`；日志 `data/logs/bag_web_<时间>.log`。命令行 `nav.sh` 手动跑的 `ros2 bag record` 仍按一个包处理。
+
 录包区的「回溯录制」打开时（默认打开），建图 / 定位 / 导航运行期间，主仓库的 `scripts/rollback_recorder.py` 把最近 20 秒的数据留在内存里循环覆盖，不写硬盘；点「保存刚才 20 秒」存成 `data/bags/snap_<时间>`，和普通录包一样可以上传、删除。topic 是默认录包列表加 `/livox/lidar /livox/imu`（`procs.py` 的 `ROLLBACK_TOPICS`）。它是独立进程、独立节点，可以和 `ros2 bag record` 同时运行。`/map`、`/tf_static`、`/robot_description` 这种只发一次的 topic 会一直保留，放在包的开头。日志在 `data/logs/rollback.log`，开关状态在 `data/rollback.json`。
+
+卡住自动保存：回溯录制在跑时，如果导航目标还没结束（没到、没取消）、底盘已解锁、没急停，而 odom 位置 8 秒内移动不到 8 cm、朝向变化不到 0.15 rad（约 9°），就认为狗卡住了，网页日志报一条警告，2 秒后自动把最近 20 秒存成 `data/bags/stuck_<时间>`（大约是停下前 10 秒加停住后 10 秒）。同一次停住只存一个；两次自动保存至少隔 60 秒。阈值在 `go2w_web.py` 的 `STUCK_*`，等待秒数也可以用环境变量 `GO2W_STUCK_SECONDS` 改。
 
 ## 部署到扩展坞
 

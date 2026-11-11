@@ -5,8 +5,8 @@ import { gridToCanvas, costToCanvas, wallMask, CLOUD } from '../util.js';
 
 const T_MAP = 1, T_SCAN = 2, T_GCOST = 3, T_LCOST = 4, T_CLOUD = 5, T_PART = 6, T_CAM = 7;
 // 已接入真机的操作；其余操作给出说明，不发任何指令
-const OPS = new Set(['initialPose', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
-  'setMode', 'toggle', 'saveRoute', 'startRoute', 'checkRoute', 'deleteRoute', 'saveMap', 'alignMap', 'loadMap', 'teleop', 'setMapView', 'deleteBag', 'uploadBag', 'setRollback', 'saveRollback']);
+const OPS = new Set(['initialPose', 'autoLocalize', 'cancel', 'arm', 'estop', 'releaseEstop', 'setParam', 'simulateDrop',
+  'setMode', 'toggle', 'standUp', 'lieDown', 'standHold', 'prepHold', 'saveRoute', 'startRoute', 'checkRoute', 'deleteRoute', 'saveMap', 'alignMap', 'loadMap', 'teleop', 'setMapView', 'deleteBag', 'uploadBag', 'setRollback', 'saveRollback']);
 const NOT_YET = {
   pause: '真机暂不支持暂停：可以取消任务，或者锁定底盘',
 };
@@ -125,15 +125,19 @@ export function createRosSource(store, bus){
           store.profiles[k] = st;
         }
         store.loc.running = m.profiles.localization === 'run' || m.profiles.navigation === 'run';
-        // 地图：data/maps 列表，map_server 正在用的，没在跑时选好的「下次启动用」
+        // 地图：data/maps 列表，网页上显示的那张（导航没开时是后端直接读的文件，mapLive = false），没在跑时选好的「下次启动用」
         const cur = m.mapCurrent, choice = m.mapChoice;
         store.maps = (m.maps || []).map(x => ({ name: x.name, meta: `${x.w ?? '?'}×${x.h ?? '?'} · ${x.res} m`, cur: x.name === cur, choice: x.name === choice }));
-        store.mapCurrent = cur; store.mapChoice = choice;
+        store.mapCurrent = cur; store.mapChoice = choice; store.mapLive = !!m.mapLive;
         store.bags = (m.bags || []).map(b => ({ name: b.name, dur: b.dur ?? 0, size: b.size }));
         store.uploads = m.uploads || {};
+        store.bagLive = m.bagLive || []; store.bagSegment = m.bagSegment || null;
         if (m.rollback) store.rollback = m.rollback;
         store.procsKnown = m.procsKnown; store.busy = m.busy;
         Object.assign(store.loc, { std: null, yaw: null, match: null }, m.loc || {});
+        store.autoLoc = m.autoLoc || null;
+        // 运控：{ on, state: Passive/FixStand/Velocity/null(收不到), ready, seq, op: up/down, msg, stood, auto, hold, lieIn }
+        store.ctrl = m.ctrl || { on: false };   // 自动定位：{ state: idle/run/ok/fail, seq, map, msg, x, y, th, score, ratio }
         store.topics = m.topics.map(t => ({ name: t.name, type: t.type, d0: false, alive: t.pubs > 0, hz: t.hz }));
         break;
       }
@@ -189,6 +193,7 @@ export function createRosSource(store, bus){
 
   const real = {
     initialPose: (p, fine) => send('initial_pose', fine ? { ...p, cov: 'fine' } : p),
+    autoLocalize: () => send('auto_localize', {}, 95000),   // 后端先等站稳最多 15 s，子进程再最多算 60 s
     cancel: () => send('cancel'),
     arm: on => send('arm', { on }),
     estop: () => send('estop'),
@@ -202,12 +207,19 @@ export function createRosSource(store, bus){
     saveRoute: route => send('route_save', route),
     setMapView: (map, angle) => send('map_view', { map, angle }),
     checkRoute: route => send('route_check', route, 35000),
+    // 站起：趴着 → 站稳（2 s 插值）→ 策略接管，后端每步最多等 3 s
+    standUp: () => send('stand_up', {}, 15000),
+    lieDown: () => send('lie_down', {}, 15000),
+    standHold: on => send('stand_hold', { on }),
+    prepHold: () => send('prep_hold'),
     deleteRoute: route_id => send('route_delete', { route_id }),
     deleteBag: name => send('bag_delete', { name }, 30000),
     uploadBag: name => send('bag_upload', { name }),
     setRollback: on => send('rollback_set', { on }),
     saveRollback: () => send('rollback_save', {}, 25000),
-    startRoute: (route_id, o = {}) => send('route_start', { route_id, round_trip: !!o.roundTrip, loops: o.loops ?? 1, arm: !!o.arm }),
+    // vmax / wmax：这次的速度上限（导航没开时在网页上选的），后端出发前设给 cmd_bridge
+    startRoute: (route_id, o = {}) => send('route_start', { route_id, round_trip: !!o.roundTrip, loops: o.loops ?? 1, arm: !!o.arm,
+      ...(o.vmax != null ? { vmax: o.vmax } : {}), ...(o.wmax != null ? { wmax: o.wmax } : {}) }),
     saveMap: name => send('save_map', { name }, 45000),
     alignMap: (source, name, angle) => send('align_map', { source, name, angle }, 125000),
     loadMap: name => send('load_map', { name }),

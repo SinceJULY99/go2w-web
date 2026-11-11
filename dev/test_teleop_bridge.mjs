@@ -1,4 +1,4 @@
-// 不开导航也能遥控：先运行 dev/run.sh，再 node dev/test_teleop_bridge.mjs [ws://127.0.0.1:8080/ws]
+// 不开导航也能遥控：先运行 web/dev/run.sh，再 node web/dev/test_teleop_bridge.mjs [ws://127.0.0.1:8080/ws]
 // 只能对本地假 ROS 运行
 const URL_ = process.argv[2] || 'ws://127.0.0.1:8080/ws';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -18,7 +18,8 @@ try {
   await until(() => prof('bridge') === 'run', 15000, '遥控速度桥起来'); ok('不开导航时遥控速度桥自动起来', true);
   r = await cmd('arm', { on: true }); ok('不开导航也能解锁', r.ok, r.msg);
   await until(() => state.armed === true, 3000, '解锁状态');
-  for (let i = 0; i < 5; i++) { ws.send(JSON.stringify({ t: 'teleop', v: 0.3, vy: 0, w: 0 })); await sleep(100); }
+  // 状态 2 Hz 广播：一直按着，最多等 2 s 看到 teleop 状态（原来只按 0.5 s，后端忙时会错过一次广播）
+  for (let i = 0; i < 20 && state.teleop !== true; i++) { ws.send(JSON.stringify({ t: 'teleop', v: 0.3, vy: 0, w: 0 })); await sleep(100); }
   ok('遥控被接受（后端在发 /cmd_vel）', state.teleop === true && !toasts.some(t => t.includes('遥控没有生效')), toasts.join(' / '));
   await sleep(600); ok('松手后停止遥控', state.teleop === false);
   r = await cmd('set_mode', { mode: 'navigation' }); ok('启动导航：接受', r.ok, r.msg);

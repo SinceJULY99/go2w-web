@@ -1,4 +1,4 @@
-// P3 协议回归测试：先运行 dev/run.sh，再在 Mac 上运行 node dev/test_p3.mjs [ws://127.0.0.1:8080/ws]
+// P3 协议回归测试：先运行 web/dev/run.sh，再在 Mac 上运行 node web/dev/test_p3.mjs [ws://127.0.0.1:8080/ws]
 // 会切换档位、巡逻、录包、存图、遥控，只能对本地假 ROS 运行，不要指向真机
 // 测试点是按默认地图 data/maps/lab_20261021 选的空旷处
 const URL_ = process.argv[2] || 'ws://127.0.0.1:8080/ws';
@@ -77,11 +77,16 @@ try {
   r = await c.cmd('bag_start', { name: bag, topics: ['/odom', '/scan'] }); ok('开始录包', r.ok, r.msg);
   await c.until(() => prof('bag') === 'run', 4000, '录包运行中'); ok('录包运行中', true);
   r = await c.cmd('bag_start', { topics: ['/odom'] }); ok('拒绝重复录包', !r.ok, r.msg);
-  await sleep(2000);
+  ok('录包中列表里没有「正在录」的包（分段，写完才进列表）', (c.state.bagLive || []).length === 0, JSON.stringify(c.state.bagLive));
+  await sleep(5000);
   r = await c.cmd('bag_stop'); ok('停止录包', r.ok, r.msg);
   await c.until(() => prof('bag') === 'stop', 4000, '录包停止');
-  await c.until(() => c.state.bags.some(b => b.name === bag), 8000, '包进列表');
-  const b0 = c.state.bags.find(b => b.name === bag); ok('包出现在列表、时长正确', b0.dur > 1.5 && b0.dur < 6, `${b0.dur?.toFixed(1)} s, ${b0.size} MB`);
+  await c.until(() => c.state.bags.some(b => b.name.startsWith(`${bag}_`)), 8000, '包进列表');
+  const segs = c.state.bags.filter(b => b.name.startsWith(`${bag}_`));
+  const total = segs.reduce((s, b) => s + (b.dur || 0), 0);
+  ok('分段包名 = 前缀_MMDD_HHMMSS', segs.every(b => new RegExp(`^${bag}_\\d{4}_\\d{6}(_\\d+)?$`).test(b.name)), segs.map(b => b.name).join(' '));
+  ok('各段时长加起来约等于录制时长', total > 4.5 && total < 9, `${segs.length} 段，共 ${total.toFixed(1)} s`);
+  ok('名字按时间排序、互不相同', new Set(segs.map(b => b.name)).size === segs.length);
 
   // 5. topic 查看
   c.send({ t: 'inspect', topic: '/odom', on: true });

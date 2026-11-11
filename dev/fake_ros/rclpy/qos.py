@@ -4,6 +4,7 @@ class DurabilityPolicy:
 
 class ReliabilityPolicy:
     RELIABLE = 'reliable'
+    BEST_EFFORT = 'best_effort'
 
 
 def QoSProfile(**kw):

@@ -1,4 +1,4 @@
-// 地图显示方向协议测试：先运行 dev/run.sh，再运行 node dev/test_map_views.mjs [ws://127.0.0.1:8080/ws]
+// 地图显示方向协议测试：先运行 web/dev/run.sh，再运行 node web/dev/test_map_views.mjs [ws://127.0.0.1:8080/ws]
 // 会切到建图档位存一张图，最后切回导航（默认地图）。只对本地假 ROS 运行
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';

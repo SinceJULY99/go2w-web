@@ -11,6 +11,8 @@ export function createActions(store, src){
   const curMode = () => Object.keys(MODES).find(m => store.profiles[m] !== 'stop') || null;
   const canMove = () => store.armed && !store.estop && run('navigation') && store.odomOk && store.link.ok;
   // 能不能遥控（不管解没解锁）：导航档的速度桥，或不开导航时后端拉起的遥控速度桥（不查里程计）
+  // 机器狗在策略（Velocity）里、能走；没接运控（ctrl.on = false）时不管
+  const walking = () => !store.ctrl?.on || (store.ctrl.state === 'Velocity' && store.ctrl.ready);
   const canTeleop = () => store.link.ok && !store.estop && ((run('navigation') && store.odomOk) || run('bridge'));
   function routeStartBlocker(route){
     if (!route) return '请先保存或选择一个任务。';
@@ -18,10 +20,12 @@ export function createActions(store, src){
     if (store.task.status === 'active' || store.profiles.patrol !== 'stop') return '请先结束当前导航或巡逻。';
     if (store.estop) return '请先解除急停。';
     if (store.busy) return '等待运行档位切换完成。';
-    if (!run('navigation')) return '导航没有运行：点右栏上面的「导航」启动。';
     if (route.map !== store.mapCurrent) return `请先切换到路线地图 ${route.map}。`;
+    if (!run('navigation')) return '先完成第 3 步「出发前自检」（会自动启动导航）。';
     if (!store.odomOk || !store.robot.valid || store.fixed !== 'map') return '等待地图定位和里程计就绪。';
-    if (!store.initPose) return '请先在第 2 步给初始位置（或确认当前位置正确）。';
+    if (!store.initPose) return '先完成第 3 步「出发前自检」（定位还没完成）。';
+    if (!walking()) return '机器狗没有站起来：重新做第 3 步「出发前自检」。';
+    if (store.prepOk && !store.prepOk(route)) return '先完成第 3 步「出发前自检」。';
     return '';
   }
   const blocked = cost => cost != null && cost >= 253;
@@ -35,7 +39,22 @@ export function createActions(store, src){
   });
 
   const A = {
-    canMove, canTeleop, curMode, routeStartBlocker,
+    canMove, canTeleop, curMode, routeStartBlocker, walking,
+    // 站起：趴着 → 站稳 → 策略接管（后端一步步等运控的状态）
+    standUp(){
+      if (!ready('standUp')) return Promise.resolve({ ok: false });
+      if (store.estop) return Promise.resolve((toast('急停中：先解除急停', 'err'), { ok: false, msg: '急停中' }));
+      return exec(src.cmd.standUp(), null);
+    },
+    // 趴下：1005 是卸力直接塌下去。任务、导航会先取消，底盘上锁，等停稳再趴
+    lieDown(){
+      if (!ready('lieDown')) return;
+      const moving = store.task.type !== 'idle' && store.task.status === 'active';
+      confirmBox({ title: '趴下', ok: '趴下', danger: true,
+        body: `${moving ? '当前任务会被取消、底盘上锁，停稳后' : ''}机器狗原地卸力趴下（直接塌下去，不是慢慢坐下）。确认周围没人、地面平整。`,
+        onOk: () => exec(src.cmd.lieDown(), null) });
+    },
+    standHold(on){ if (ready('standHold')) exec(src.cmd.standHold(on), null); },
     // fine = 重定位的微调：后端用小协方差，AMCL 不会把粒子撒开
     initialPose(p, fine = false){
       const no = msg => (toast(msg, 'err'), { ok: false, msg });
@@ -44,16 +63,25 @@ export function createActions(store, src){
       if (!fine && store.costAt && blocked(store.costAt(p.x, p.y))) return Promise.resolve(no('该位置在障碍物上'));
       return exec(src.cmd.initialPose(p, fine), fine ? null : '初始位姿已发布，粒子收敛中').then(r => { if (r?.ok !== false) store.onInitialPose?.(); return r; });
     },
+    // 自动定位：后端用当前 scan 在整张地图上找机器人，可信才发给 AMCL（不可信只报告，不改位姿）
+    autoLocalize(){
+      if (!ready('autoLocalize')) return Promise.resolve({ ok: false });
+      if (!run('localization') && !run('navigation')) return Promise.resolve((toast('定位没有运行', 'err'), { ok: false }));
+      if (store.task.type !== 'idle' && store.task.status === 'active') return Promise.resolve((toast('任务进行中：先取消再自动定位', 'err'), { ok: false }));
+      toast('自动定位中：机器人保持静止，约需 5–10 秒', 'warn');
+      return exec(src.cmd.autoLocalize(), null);
+    },
     routePoint(p){
+      // 导航没开时地图是后端直接读的文件，点的坐标同样是地图坐标，可以照常选点
       const draft = store.routeDraft, map = store.mapCurrent;
-      if (!map || store.fixed !== 'map') return toast('请先加载地图并等待地图定位', 'err');
+      if (!map || !store.map) return toast('还没有地图：先在第 1 步选择地图', 'err');
       if (draft.map && draft.map !== map) return toast('路线属于另一张地图，请先新建路线', 'err');
       if (draft.points.length >= 50) return toast('每条路线最多 50 个点', 'err');
       if (store.costAt && blocked(store.costAt(p.x, p.y))) return toast('该位置在障碍物或膨胀区内', 'err');
       const last = draft.points.at(-1);
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < .05) return toast('这一站已添加', 'warn');
       store.routeDraft = { ...draft, map, points: [...draft.points, p], confirmed: false };
-      store.onRouteEdit?.();   // 右栏展开第 3 步
+      store.onRouteEdit?.();   // 右栏展开第 2 步
     },
     checkRoute(draft){
       if (src.name !== 'ros') return Promise.resolve({ ok:false, msg:'纯前端模拟，尚未用 Nav2 检查路径' });
@@ -72,23 +100,19 @@ export function createActions(store, src){
           if (reply?.ok) onDeleted();
         } });
     },
-    // 「启动导航」：确认框列出这次的设置，确认 = 自动解锁 + 出发（后端 route_start 带 arm）
+    // 「出发」：第 3 步自检已经把地图、定位、路线都核对过，点一下就自动解锁出发（后端 route_start 带 arm）。
+    // opts.vmax / wmax：第 4 步选的速度上限，后端出发前设给 cmd_bridge。
+    // 只有激光和地图对不太上（匹配率 < 60%）时才多问一句
     startRoute(route, opts = {}){
       const reason = routeStartBlocker(route);
       if (reason) return toast(reason, 'err');
-      const R = store.robot, m = store.loc.match, P = store.params;
-      const rows = [
-        ['地图', store.mapCurrent || '--'],
-        ['初始位置', `(${R.x.toFixed(2)}, ${R.y.toFixed(2)}) ${Math.round(deg(R.th)) || 0}°${m != null ? ` · 匹配率 ${m.toFixed(0)}%` : ''}`],
-        ['任务', `${route.name} · ${route.points.length} 站`],
-        ['循环', opts.roundTrip ? (opts.loops ? `${opts.loops} 圈（终点直接回 1 号站）` : '一直循环') : '单程'],
-        ['速度上限', `${P.vmax != null ? P.vmax.toFixed(2) : '--'} m/s · ${P.wmax != null ? P.wmax.toFixed(1) : '--'} rad/s`],
-      ];
-      const warn = m != null && m < 60 ? `匹配率只有 ${m.toFixed(0)}%，初始位置可能不准，建议先重新设置。` : '';
-      return new Promise(resolve => formBox({ title: '确认启动导航', rows, warn, ok: '解锁并出发',
-        body: '确认后底盘自动解锁并立即出发。随时可以按急停（Space）或「取消」。',
-        onCancel: () => resolve(null),
-        onOk: () => resolve(exec(src.cmd.startRoute(route.id, { ...opts, arm: true }), '底盘已解锁，多站任务已启动')) }));
+      const go = () => exec(src.cmd.startRoute(route.id, { ...opts, arm: true }), '底盘已解锁，任务已出发');
+      const R = store.robot, m = store.loc.match;
+      if (m == null || m >= 60) return go();
+      return new Promise(resolve => formBox({ title: '定位可能不准', ok: '仍然出发', danger: true,
+        rows: [['当前位置', `(${R.x.toFixed(2)}, ${R.y.toFixed(2)}) ${Math.round(deg(R.th)) || 0}°`], ['匹配率', `${m.toFixed(0)}%`]],
+        warn: `激光和地图的匹配率只有 ${m.toFixed(0)}%，建议先在第 3 步重新定位。`,
+        onCancel: () => resolve(null), onOk: () => resolve(go()) }));
     },
     cancel(){ if (ready('cancel')) exec(src.cmd.cancel(), '任务已取消'); },
     pause(){ if (ready('pause')) src.cmd.pause(!src.paused); },
