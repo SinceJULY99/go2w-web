@@ -54,19 +54,25 @@ def main():
     # Camera.on_packet：从第一个关键帧开始，队列满时丢到下一个关键帧
     cam = C.Camera(lambda k, m, b: (m, b), 7, lambda *a: None)
     import asyncio
-    cam.queue = asyncio.Queue(C.QUEUE_MAX)
+    slow = cam.viewers['slow'] = C.Viewer(None, 'slow')       # 不取帧的观看者：队列满后丢到下一个关键帧
+    fast = cam.viewers['fast'] = C.Viewer(None, 'fast')
+    fast.queue = asyncio.Queue(10000)
     for _, p in pkts:
         cam.on_packet(p)
-        if cam.queue.qsize() > 10:
-            while not cam.queue.empty():
-                cam.queue.get_nowait()
-    first = None
+    assert slow.dropped >= 1 and slow.queue.qsize() <= C.QUEUE_MAX, '慢的观看者应该丢帧'
+    assert fast.dropped == 0, '一个人卡住不影响别人'
+    late = C.Viewer(None, 'late'); late.queue = asyncio.Queue(10000)
     cam2 = C.Camera(lambda k, m, b: (m, b), 7, lambda *a: None)
-    cam2.queue = asyncio.Queue(10000)
-    for _, p in pkts:
+    cam2.viewers['a'] = v2 = C.Viewer(None, 'a'); v2.queue = asyncio.Queue(10000)
+    for i, (_, p) in enumerate(pkts):
+        if i == len(pkts) // 2:
+            cam2.viewers['late'] = late                         # 中途加入：也从关键帧开始
         cam2.on_packet(p)
-    first = cam2.queue.get_nowait()
+    assert late.queue.get_nowait()[0]['key'] is True, '中途加入的第一帧也必须是关键帧'
+    first = v2.queue.get_nowait()
     assert first[0]['key'] is True, '第一帧必须是关键帧'
+    print(f'PASS 多人观看：各自排队，慢的丢 {slow.dropped} 次不影响别人，中途加入从关键帧开始')
+    cam2.queue = v2.queue
     durs = []
     while not cam2.queue.empty():
         durs.append(cam2.queue.get_nowait()[0]['dur'])

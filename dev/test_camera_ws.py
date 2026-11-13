@@ -35,8 +35,8 @@ class Client:
                 elif d.get('t') == 'logs':
                     self.logs += [x[2] for x in d['items']]
 
-    async def cam(self, on, take=False):
-        await self.ws.send_str(json.dumps({'t': 'cam', 'on': on, 'take': take}))
+    async def cam(self, on):
+        await self.ws.send_str(json.dumps({'t': 'cam', 'on': on}))
 
     async def until(self, fn, what, timeout=6.0):
         end = asyncio.get_running_loop().time() + timeout
@@ -65,21 +65,33 @@ async def main():
         print(f"PASS 申请后从关键帧开始收到画面：{st['size'][0]}×{st['size'][1]}，{st['fps']} 帧/秒，{st['kbps']} kbit/s")
 
         await b.cam(True)
-        await b.until(lambda: b.states and b.states[-1]['state'] == 'busy', 'B 被拒')
-        assert b.states[-1]['by'] == '127.0.0.1'
-        await asyncio.sleep(1.0)
-        assert not b.frames, '被拒的网页不应收到画面'
-        print('PASS 同一时间只给一个网页，别人申请时提示正在被谁查看')
-
-        await b.cam(True, take=True)
-        await a.until(lambda: any(x['state'] == 'taken' for x in a.states), 'A 被接管')
-        await b.until(lambda: len(b.frames) >= 10, 'B 收到画面')
-        assert b.frames[0]['key'] is True
+        await b.until(lambda: len(b.frames) >= 10, 'B 也收到画面')
+        assert b.frames[0]['key'] is True, 'B 第一帧必须是关键帧'
+        c = await Client(s).open()
+        await c.cam(True)
+        await c.until(lambda: len(c.frames) >= 10, 'C 也收到画面')
         n = len(a.frames)
-        await asyncio.sleep(1.0)
-        assert len(a.frames) <= n + 2, '被接管后 A 不应继续收到画面'
-        print('PASS 接管：原来的网页收到提示并停止，新网页从关键帧开始')
+        await a.until(lambda: len(a.frames) >= n + 10, 'A 继续收到画面')
+        await a.until(lambda: any(x.get('viewers') == 3 for x in a.states), 'A 看到 3 人在看', 3)
+        print('PASS 三个网页同时观看，各自从关键帧开始')
 
+        d = await Client(s).open()
+        await d.cam(True)
+        await d.until(lambda: d.states and d.states[-1]['state'] == 'full', 'D 被拒')
+        assert d.states[-1]['max'] == 3 and len(d.states[-1]['who']) == 3, d.states[-1]
+        await asyncio.sleep(1.0)
+        assert not d.frames, '满员时不应收到画面'
+        print('PASS 第 4 个网页提示人数已满')
+
+        await c.close()
+        await asyncio.sleep(0.3)
+        await d.cam(True)
+        await d.until(lambda: len(d.frames) >= 5, 'C 走后 D 可以看')
+        await d.cam(False)
+        await asyncio.sleep(0.3)
+        print('PASS 有人关闭后空出名额')
+
+        await a.cam(False)
         await b.cam(False)
         await asyncio.sleep(0.5)
         n = len(b.frames)
@@ -90,12 +102,8 @@ async def main():
 
         await a.cam(True)
         await a.until(lambda: a.states[-1]['state'] in ('starting', 'on'), 'A 重新申请')
-        await a.close()
-        await asyncio.sleep(0.5)
-        await b.cam(True)
-        await b.until(lambda: b.states[-1]['state'] == 'starting', '看画面的网页关闭后，别人可以申请')
-        await b.close()
-        print('PASS 看画面的网页关闭后自动释放')
+        await a.close(); await b.close(); await d.close()
+        print('PASS 重新申请正常')
 
 
 asyncio.run(main())

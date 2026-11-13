@@ -27,12 +27,9 @@ BAG = f'{BAG_SEG}|[r]os2 bag record'
 BAG_SEGMENT = 30   # 网页录包每个包的秒数
 # 不开导航时给网页遥控用的独立速度桥（导航档自带一个，两者不能同时跑）
 BRIDGE = '[r]os2 launch go2w_bringup control.launch.py'
-# 回溯录制的 topic：网页默认录包列表 + MID360 原始点云和 IMU
-ROLLBACK_TOPICS = ('/tf /tf_static /robot_description /map /odom /odom_healthy /scan /amcl_pose /initialpose /particle_cloud '
-                   '/goal_pose /plan /transformed_global_plan /local_costmap/costmap /global_costmap/costmap '
-                   '/cmd_vel_nav /cmd_vel /go2w_cmd_bridge/armed /navigate_to_pose/_action/status '
-                   '/navigate_to_pose/_action/feedback /follow_path/_action/status /behavior_tree_log /rosout '
-                   '/livox/lidar /livox/imu')
+# 回溯录制：11-12 起录所有 topic（和网页默认录包一致）；缓存上限 400 MB，数据量大时回溯时长会短于设定值
+ROLLBACK_TOPICS = '--all'
+ALL_TOPICS = '*'   # 录包 topic 列表里写 * = 录所有 topic
 
 
 class DockerProcs:
@@ -122,10 +119,11 @@ class DockerProcs:
 
     async def start_bag(self, prefix, topics, seconds=BAG_SEGMENT):
         """分段录包：每 seconds 秒一个包，包名 = 前缀_MMDD_HHMMSS（这一段的开始时间）。"""
-        assert SAFE_NAME.match(prefix) and topics and all(SAFE_TOPIC.match(t) for t in topics)
+        assert SAFE_NAME.match(prefix) and topics and all(t == ALL_TOPICS or SAFE_TOPIC.match(t) for t in topics)
+        args = (['--all'] if ALL_TOPICS in topics else []) + [t for t in topics if t != ALL_TOPICS]
         await self.spawn(f'mkdir -p /go2w/data/bags {LOGS}; chown -R 1000:1000 /go2w/data; '
                          f'exec python3 /go2w/scripts/segment_recorder.py --seconds {float(seconds)} --prefix {prefix} '
-                         f'{" ".join(topics)} > {LOGS}/bag_{prefix}_$(date +%m%d_%H%M%S).log 2>&1')
+                         f'{" ".join(args)} > {LOGS}/bag_{prefix}_$(date +%m%d_%H%M%S).log 2>&1')
 
     async def stop_bag(self):
         # 分段录包收到 SIGINT 会把当前这段写完再退出（大包可能要几秒）

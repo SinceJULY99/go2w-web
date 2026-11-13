@@ -1,55 +1,59 @@
 import { $, deg } from './util.js';
+// 右栏「导航任务」：选 / 新建 / 编辑路线，运行参数（跟任务一起保存），出发按钮（出发流程在 flow.js）
 
 export function setupRouteEditor(store, actions, setTool){
   const select = $('#routeSelect'), name = $('#routeName'), list = $('#routePoints');
   const save = $('#routeSave'), run = $('#routeRun'), hint = $('#routeHint'), remove = $('#routeDelete');
-  const confirm = $('#routeConfirm'), check = $('#routeCheck'), saveRow = $('#routeSaveRow');
+  const confirm = $('#routeConfirm'), saveRow = $('#routeSaveRow');
   const runHint = $('#routeRunHint'), round = $('#routeRound'), loops = $('#routeLoops');
-  let lastRoutes, lastMap, lastDraft, savedDraft = store.routeDraft, saving = false, starting = false;
+  const optsBox = $('#routeOpts'), optsDirtyTag = $('#routeOptsDirty'), revert = $('#routeRevert');
+  const rtV = $('#rtV'), rtW = $('#rtW');
+  let lastRoutes, lastMap, lastDraft, savedDraft = store.routeDraft, saving = false;
   const selected = () => store.routes.find(route => route.id === select.value);
+
+  // ---------- 运行参数（11-12 起跟任务一起保存）：循环、圈数、最大 vx / wz ----------
+  const DEFAULT_OPTS = { loop:false, loops:1, vmax:0.45, wmax:1.2 };
+  const optsOf = route => ({ ...DEFAULT_OPTS, ...(route?.opts || {}) });
+  const readLoops = () => Math.min(1000, Math.max(0, Math.round(+loops.value || 0)));
+  const readOpts = () => ({ loop:round.checked, loops:readLoops(), vmax:+(+rtV.value).toFixed(2), wmax:+(+rtW.value).toFixed(2) });
+  const showOpts = () => { $('#oRtV').textContent = `${(+rtV.value).toFixed(2)} m/s`; $('#oRtW').textContent = `${(+rtW.value).toFixed(1)} rad/s`; };
+  function setOpts(o){
+    round.checked = !!o.loop; loops.value = o.loops; loops.disabled = !o.loop;
+    rtV.value = o.vmax; rtW.value = o.wmax; showOpts();
+    lastDraft = null;            // 循环开关影响站点列表里终点的写法
+  }
+  const sameOpts = (a, b) => a.loop === b.loop && (!a.loop || a.loops === b.loops) && Math.abs(a.vmax - b.vmax) < 1e-6 && Math.abs(a.wmax - b.wmax) < 1e-6;
+  // 参数和保存的任务不一样（新路线没有「保存的」，不算）
+  const optsDirty = () => { const r = selected(); return !!r && savedDraft.id === r.id && !sameOpts(readOpts(), optsOf(r)); };
 
   function edit(route = null){
     store.routeDraft = route ? { ...route, confirmed: true } : { id:null, map:null, points:[], confirmed:false };
     store.routeCheck = null;
     savedDraft = store.routeDraft;
     name.value = route?.name || '';
+    setOpts(optsOf(route));
   }
 
-  async function verify(draft){
-    if (store.routeCheck?.pending) return;
-    // 导航没开（只是在文件地图上编辑）：没有 Nav2 可问，出发前自检时再检查
-    if (store.source === 'ros' && store.profiles.navigation !== 'run'){
-      store.routeCheck = { draft, pending:false, message:'导航没开：出发前自检时会用 Nav2 检查站间路径' };
-      return render();
-    }
-    const preview = { draft, pending:true };
-    store.routeCheck = preview;
-    render();
-    const reply = await actions.checkRoute(draft);
-    if (store.routeCheck !== preview || store.routeDraft !== preview.draft) return;
-    Object.assign(preview, { pending:false, paths:reply.data?.paths, message:reply.msg, simulated:reply.data?.simulated });
-    render();
-  }
-
-  // 往返循环：1 → … → N → … → 1 算一次；0 = 一直往返。只在启动时生效，不存进任务
-  const readLoops = () => Math.min(1000, Math.max(0, Math.round(+loops.value || 0)));
-  // 勾选循环后最后一站不再是终点：重画站点列表
+  // 循环：1 → … → N → 1 算一圈；0 = 一直循环。勾选循环后最后一站不再是终点：重画站点列表
   round.onchange = () => { loops.disabled = !round.checked; lastDraft = null; render(); };
-  loops.onchange = () => { loops.value = readLoops(); };
+  loops.oninput = render;
+  loops.onchange = () => { loops.value = readLoops(); render(); };
+  rtV.oninput = rtW.oninput = () => { showOpts(); render(); };
+  revert.onclick = () => { setOpts(optsOf(selected())); render(); };
 
   select.onchange = () => { edit(selected()); setTool('pan'); render(); };
   $('#routeNew').onclick = () => { select.value = ''; edit(); setTool('route'); render(); };
+  // 出发：参数 / 名称改过没保存就先保存（按钮显示「保存并出发」），然后交给 flow.js 的出发流程（站立 → 导航 → 定位 → 下发）
   run.onclick = async () => {
     if (run.disabled) return;
-    const route = selected();
-    starting = true;
-    render();
-    try {
-      await actions.startRoute(route, { roundTrip: round.checked, loops: readLoops(), vmax: +$('#slV').value, wmax: +$('#slW').value });
-    } finally {
-      starting = false;
-      render();
+    let route = selected();
+    if (needSave()){
+      const saved = await doSave();
+      if (!saved) return;
+      route = saved;
     }
+    store.startGo?.(route);
+    render();
   };
   remove.onclick = () => {
     const route = selected();
@@ -72,15 +76,14 @@ export function setupRouteEditor(store, actions, setTool){
     setTool('pan');
     render();
     name.focus();
-    verify(store.routeDraft);
   };
-  check.onclick = () => verify(store.routeDraft);
-  save.onclick = async () => {
-    const draft = store.routeDraft, input = name.value;
+  // 保存（新建或覆盖同一个任务）：路线点 + 名称 + 运行参数。成功返回保存后的任务
+  async function doSave(){
+    const draft = store.routeDraft, input = name.value, opts = readOpts();
     saving = true;
     render();
     try {
-      const reply = await actions.saveRoute(input);
+      const reply = await actions.saveRoute(input, opts);
       if (reply?.ok && store.routeDraft === draft && name.value === input){
         const preview = store.routeCheck;
         edit(reply.data);
@@ -88,14 +91,19 @@ export function setupRouteEditor(store, actions, setTool){
           preview.draft = store.routeDraft;
           store.routeCheck = preview;
         }
-        render();
         select.value = reply.data.id;
+        return reply.data;
       }
+      return null;
     } finally {
       saving = false;
       render();
     }
-  };
+  }
+  save.onclick = () => doSave();
+  // 路线点没变、只改了名称或参数：出发时可以顺手保存
+  const nameDirty = () => name.value !== (savedDraft.name || '');
+  const needSave = () => { const r = selected(); return !!r && store.routeDraft === savedDraft && store.routeDraft.id === r.id && (optsDirty() || nameDirty()); };
 
   function render(){
     let draft = store.routeDraft;
@@ -160,36 +168,37 @@ export function setupRouteEditor(store, actions, setTool){
       }));
     }
     const preview = store.routeCheck?.draft === draft ? store.routeCheck : null;
-    const dirty = draft !== savedDraft || name.value !== (savedDraft.name || '');
+    const pointsDirty = draft !== savedDraft;
     const matching = draft.map && draft.map === store.mapCurrent;
     const running = store.task.type !== 'idle' && store.task.status === 'active';
     const route = selected();
+    const pDirty = optsDirty(), saveNeeded = needSave();
     remove.hidden = !route;
     remove.disabled = saving || (running && store.task.routeId === route?.id);
     confirm.hidden = draft.confirmed;
     confirm.disabled = !matching || draft.points.length < 2;
-    check.hidden = !draft.confirmed;
-    check.disabled = !matching || running || !!preview?.pending || store.profiles.navigation !== 'run';
-    saveRow.hidden = !draft.confirmed;
-    save.disabled = saving || !matching || !draft.confirmed || !name.value.trim();
+    saveRow.hidden = optsBox.hidden = !draft.confirmed;
+    optsDirtyTag.hidden = revert.hidden = !pDirty;
+    save.disabled = saving || !matching || !draft.confirmed || !name.value.trim() || (!pointsDirty && !saveNeeded && !!route);
+    save.textContent = route && draft.id === route.id ? '保存修改' : '保存任务';
+    // 出发按钮
+    const going = store.prep?.();
     const runningSelected = running && !!route && store.task.routeId === route.id;
-    let runMessage = actions.routeStartBlocker(route);
+    let runMessage = actions.routeGoBlocker(route);
     if (runningSelected) runMessage = '查看下方「导航任务」卡片了解进度。';
-    else if (starting) runMessage = '正在向后端提交任务。';
     else if (saving) runMessage = '正在保存任务。';
-    else if (dirty && draft.points.length) runMessage = '请先确认并保存当前路线。';
-    else if (preview?.pending) runMessage = '正在检查路径，完成后可以启动。';
-    run.disabled = runningSelected || starting || !!runMessage;
-    const runText = runningSelected ? '导航任务执行中' : starting ? '正在出发…' : '出发';
+    else if (pointsDirty && draft.points.length) runMessage = draft.confirmed ? '路线改过了：先保存任务。' : '请先确认并保存当前路线。';
+    else if (!runMessage && saveNeeded) runMessage = '参数改过还没保存：点「保存并出发」会先保存。';
+    if (going && !going.fail) runMessage = '';
+    run.disabled = runningSelected || saving || !!going || (!!runMessage && !(saveNeeded && !actions.routeGoBlocker(route)));
+    const runText = runningSelected ? '导航任务执行中' : going && !going.fail ? `出发中 · ${going.name}…` : going?.fail ? '出发失败' : saveNeeded ? '保存并出发' : '出发';
     if (run.textContent !== runText) run.textContent = runText;
     if (runHint.textContent !== runMessage) runHint.textContent = runMessage;
     let message = '用「导航点」单击加点，拖拽可指定朝向。至少选两站。';
     if (draft.map && !matching) message = `路线属于地图 ${draft.map}，请先切图。`;
     else if (!draft.confirmed && draft.points.length >= 2) message = '选完后点击「确认路线」，最后一站将标为终点。';
     else if (draft.confirmed){
-      if (preview?.pending) message = '正在检查站间路径…';
-      else if (preview?.message) message = (preview.simulated ? '本地模拟 · ' : '') + preview.message;
-      else message = '路线已确认，尚未检查站间路径。';
+      message = '路线已确认。';
     }
     if (hint.textContent !== message) hint.textContent = message;
   }

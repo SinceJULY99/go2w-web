@@ -145,17 +145,49 @@ export function createMapView(store, actions){
     ctx.fillStyle = '#04070c'; ctx.beginPath(); ctx.arc(kx, ky, 2.5, 0, 7); ctx.fill();
     ctx.restore();
   }
+  // 小车颜色跟着任务走：空闲青色 / 执行中琥珀色（呼吸） / 到位绿色（停在终点附近一直保持） / 失败红色 / 急停红色
+  const COL = { idle: ACC, run: '#f3b13f', ok: '#35d48a', fail: '#ff4b5c', off: '#9db0c7' };
+  const rgba = (hex, a) => `rgba(${parseInt(hex.slice(1,3),16)},${parseInt(hex.slice(3,5),16)},${parseInt(hex.slice(5,7),16)},${a.toFixed(3)})`;
+  const RS = { prev: null, point: null, arrived: null, burstAt: -1e9, burstCol: COL.ok };
+  const ARRIVED_KEEP = 0.3; // 离开终点超过 0.3 m 就不再显示「到位」
+  function robotState(R){
+    const T = store.task || {}, active = T.type && T.type !== 'idle' && T.status === 'active';
+    const done = T.type && T.type !== 'idle' && !active ? T.status : null;
+    const burst = col => { RS.burstAt = performance.now(); RS.burstCol = col; };
+    // 结束瞬间：成功记下到位位置并放一次波纹；失败放红色波纹
+    if (done && RS.prev !== done){
+      if (done === 'succeeded'){ RS.arrived = { x: R.x, y: R.y }; burst(COL.ok); }
+      else if (done === 'aborted'){ RS.arrived = null; burst(COL.fail); }
+      else RS.arrived = null;
+    }
+    // 多点任务：每到一站（站号前进）也闪一次绿
+    if (active && T.type === 'route' && RS.point != null && T.point !== RS.point) burst(COL.ok);
+    RS.point = active && T.type === 'route' ? T.point : null;
+    RS.prev = done || (active ? 'active' : 'idle');
+    if (active) RS.arrived = null;
+    if (RS.arrived && Math.hypot(R.x - RS.arrived.x, R.y - RS.arrived.y) > ARRIVED_KEEP) RS.arrived = null;
+    if (store.estop) return { col: COL.fail, glow: COL.fail };
+    if (active && T.phase !== 'checking') return { col: COL.run, glow: COL.run, pulse: true };
+    if (done === 'aborted') return { col: COL.fail, glow: COL.fail };
+    if (RS.arrived) return { col: COL.ok, glow: COL.ok };
+    return actions.canMove() ? { col: COL.idle, glow: COL.idle } : { col: COL.off, glow: COL.idle };
+  }
   function drawRobot(){
     const R = store.robot, s = view.s, x = sx(R.x), y = sy(R.y);
     if (on('rings')){ ctx.save(); ctx.strokeStyle = 'rgba(220,235,250,.22)'; ctx.lineWidth = 1; ctx.setLineDash([3,5]);
       for (const r of [1,2,4]){ ctx.beginPath(); ctx.arc(x, y, r*s, 0, 7); ctx.stroke(); }
       ctx.setLineDash([]); ctx.fillStyle = 'rgba(220,235,250,.45)'; ctx.font = '10px "JetBrains Mono",monospace'; ctx.textAlign = 'left';
       for (const r of [2,4]) ctx.fillText(r+' m', x + r*s*.707 + 3, y - r*s*.707 - 3); ctx.restore(); }
-    const red = store.estop, col = red ? '#ff4b5c' : actions.canMove() ? ACC : '#9db0c7';
+    const st = robotState(R), col = st.col;
     ctx.save(); ctx.translate(x, y);
-    const rg = Math.max(24, .9*s), gl = ctx.createRadialGradient(0,0,0,0,0,rg);
-    gl.addColorStop(0, red ? 'rgba(255,75,92,.35)' : 'rgba(56,225,220,.3)'); gl.addColorStop(1, 'rgba(56,225,220,0)');
-    ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, rg, 0, 7); ctx.fill();
+    const rg = Math.max(24, .9*s), pulse = st.pulse ? .65 + .35*Math.sin(t*5) : 1, gl = ctx.createRadialGradient(0,0,0,0,0,rg*(st.pulse ? .9 + .15*Math.sin(t*5) : 1));
+    gl.addColorStop(0, rgba(st.glow, .35*pulse)); gl.addColorStop(1, rgba(st.glow, 0));
+    ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, rg*1.1, 0, 7); ctx.fill();
+    // 到位瞬间：绿色波纹扩散两圈
+    const age = performance.now() - RS.burstAt;
+    if (age < 1600){ ctx.lineWidth = 2.5;
+      for (const d of [0, 350]){ const k = (age - d) / 1250; if (k <= 0 || k >= 1) continue;
+        ctx.strokeStyle = rgba(RS.burstCol, 1 - k); ctx.beginPath(); ctx.arc(0, 0, rg*(.5 + 1.6*k), 0, 7); ctx.stroke(); } }
     ctx.rotate(-R.th);
     const Lb = Math.max(22, .76*s), Wb = Math.max(14, .48*s);   // nav2.yaml 的 footprint：0.76 × 0.48 m
     ctx.fillStyle = col; for (const [a,b] of [[1,1],[1,-1],[-1,1],[-1,-1]]) ctx.fillRect(a*Lb*.36 - Lb*.1, b*(Wb/2+2) - 2.5, Lb*.2, 5);
@@ -220,6 +252,8 @@ export function createMapView(store, actions){
       for (const [want, col] of [[1, '#35d48a'], [0, '#ff4b5c']]){ ctx.fillStyle = col;
         for (let i=0, k=0; i<pts.length; i+=2, k++) if (ok[k] === want) ctx.fillRect(sx(pts[i])-1.6, sy(pts[i+1])-1.6, 3.2, 3.2); }
     } else if (on('scan')){ const sc = store.scan; ctx.fillStyle = '#fff'; for (let i=0;i<sc.length;i+=2) ctx.fillRect(sx(sc[i])-1.2, sy(sc[i+1])-1.2, 2.4, 2.4); }
+    // 小车画在路线下面：路径、局部轨迹、站点、目标点都压在车上，导航时路线更显眼
+    if (R.valid) drawRobot();
     const P = store.plan;
     if (P && on('plan')){
       const pts = P.pts, k = Math.min(store.planIdx, pts.length-1);
@@ -250,7 +284,6 @@ export function createMapView(store, actions){
         draft.confirmed && i === draft.points.length - 1 ? '#94e8a8' : '#ffe08a', draft.confirmed || p.manualHeading !== false));
     }
     if (store.goal) drawGoal(store.goal);
-    if (R.valid) drawRobot();
     if (store.reloc?.on) drawRelocGhost();
     if (on('tf')) drawTF();
     const wall = alignment().points;

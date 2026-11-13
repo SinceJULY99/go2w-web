@@ -70,8 +70,10 @@ class FakeProcs:
             await asyncio.sleep(0.2)
             if not request.exists():
                 continue
-            name = request.read_text().strip()
+            parts = request.read_text().split()
             request.unlink()
+            name = parts[0]
+            seconds = float(parts[1]) if len(parts) > 1 else seconds
             (bags / name).mkdir(parents=True)
             (bags / name / f'{name}_0.mcap').write_bytes(b'\0' * int(seconds * 50_000))
             (bags / name / 'metadata.yaml').write_text(

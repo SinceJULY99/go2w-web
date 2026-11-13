@@ -94,6 +94,22 @@ seg.add('/odom', 'nav_msgs/msg/Odometry', 'a', t=base)
 seg.stop()
 check('重名时加 _2', os.path.isdir(os.path.join(d3, f'web_{t0}_2')))
 
+# 录这段期间同名的回溯包先存进了 data/bags：这段改名，不丢
+d5 = tempfile.mkdtemp()
+seg = Segments(d5, 'go2w', 30, FakeWriter, log=lambda *a, **k: None, clock=lambda: base, local=time.gmtime)
+seg.add('/odom', 'nav_msgs/msg/Odometry', 'a', t=base)
+os.makedirs(os.path.join(d5, f'go2w_{t0}'))   # 回溯包抢先占了名字
+seg.stop()
+check('同名回溯包已存在时这段改名 _2', os.path.isdir(os.path.join(d5, f'go2w_{t0}_2'))
+      and not os.listdir(os.path.join(d5, '.recording')), sorted(os.listdir(d5)))
+# 正在存的回溯包（.rollback 里）也要避开
+d6 = tempfile.mkdtemp()
+os.makedirs(os.path.join(d6, '.rollback', f'go2w_{t0}'))
+seg = Segments(d6, 'go2w', 30, FakeWriter, log=lambda *a, **k: None, clock=lambda: base, local=time.gmtime)
+seg.add('/odom', 'nav_msgs/msg/Odometry', 'a', t=base)
+seg.stop()
+check('避开正在存的回溯包', os.path.isdir(os.path.join(d6, f'go2w_{t0}_2')), sorted(os.listdir(d6)))
+
 # 上次异常退出留下的段
 d4 = tempfile.mkdtemp()
 os.makedirs(os.path.join(d4, '.recording', 'web_1111_120000'))

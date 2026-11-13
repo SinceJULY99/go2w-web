@@ -78,8 +78,16 @@ try {
   assert.equal((await c.cmd('route_save', { map, name:'非法', points:[first] })).ok, false);
   assert.equal((await c.cmd('route_save', { map:'错误地图', name:'非法', points })).ok, false);
   assert.equal((await c.cmd('route_start', { route_id:route.id })).ok, false, '上锁时拒绝执行');
+  assert.deepEqual(route.opts, { loop:false, loops:1, vmax:0.45, wmax:1.2 }, '没给运行参数时用默认值');
+  const withOpts = await command('route_save', { route_id:route.id, map, name:'三点测试', points, opts:{ loop:true, loops:3, vmax:0.6, wmax:1 } });
+  assert.deepEqual(withOpts.opts, { loop:true, loops:3, vmax:0.6, wmax:1 }, '运行参数跟任务保存');
+  for (const bad of [{ vmax:2 }, { wmax:0 }, { loops:-1 }, { loops:1.5 }, { loop:'yes' }])
+    assert.equal((await c.cmd('route_save', { route_id:route.id, map, name:'三点测试', points, opts:bad })).ok, false, `拒绝参数 ${JSON.stringify(bad)}`);
+  await until(() => observer.routes?.some(r => r.id === route.id && r.opts?.loops === 3), '另一客户端收到参数');
+  console.log('PASS 运行参数跟任务保存、修改后覆盖原任务、非法参数被拒绝');
   const edited = await command('route_save', { route_id:route.id, map, name:'三点任务', points });
   assert.equal(edited.id, route.id);
+  assert.deepEqual(edited.opts, { loop:false, loops:1, vmax:0.45, wmax:1.2 }, '不带 opts 保存 = 默认参数');
   assert.deepEqual(edited.points, points, '保存并更新后仍保留站名和朝向');
   assert.equal((await c.cmd('route_save', {
     map, name:'非法站名', points:[{ ...first, name:'长'.repeat(41) }, points[1]],
@@ -151,9 +159,8 @@ try {
   await until(() => c.task?.name === fail.name && c.task.status === 'aborted', '第二点失败');
   assert.equal(c.task.point, 2);
   assert.equal(c.tasks.some(t => t.name === fail.name && t.point === 3), false);
-  assert.equal(c.tasks.some(t => t.name === fail.name && t.phase === 'follow'), false);
-  assert.match(c.task.message, /规划检查失败/);
-  console.log('PASS 第二站不可达，出发前拒绝整条任务');
+  assert.doesNotMatch(c.task.message || '', /规划检查失败/, '出发前不再做整圈规划检查');
+  console.log('PASS 第二站不可达：出发后跑到这一段时失败，不会跳到第 3 站');
 
   async function safetyCase(name, stop, expectLock){
     await command('initial_pose', first);

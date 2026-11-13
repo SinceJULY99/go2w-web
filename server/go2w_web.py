@@ -86,14 +86,18 @@ UPLOAD_LABEL = os.environ.get('GO2W_UPLOAD_LABEL', '166:~/go2w_bags')
 # 没上传的不自动删，只报警并拒绝开始新的录包；正在录的包自己就超过上限（或磁盘快满）时自动停止录包
 BAG_LIMIT_GB = float(os.environ.get('GO2W_BAG_LIMIT_GB', '100'))
 BAG_MIN_FREE_GB = float(os.environ.get('GO2W_BAG_MIN_FREE_GB', '10'))
-ROLLBACK_SECONDS = 20         # 回溯录制的长度
+ROLLBACK_SECONDS = 20         # 手动「保存刚才 N 秒」的长度
+# 包名 = <狗编号>_<月日>_<时分秒>（11-12：原来是 go2w_，改成带狗编号，多狗时能区分；环境变量 GO2W_ROBOT_ID 可改）
+BAG_PREFIX = os.environ.get('GO2W_ROBOT_ID', 'go2w-01')
+ROLLBACK_BUFFER = 30          # 回溯进程缓存的长度，要装得下卡住自动保存的 前 + 后
 ROLLBACK_RETRY = 30.0         # 回溯进程退出后，隔多久再拉起来
 ROLLBACK_SAVE_TIMEOUT = 20.0  # 等存包完成的最长时间
 # 卡住自动保存：导航目标没结束、底盘已解锁、没急停，odom 位置在 STUCK_MOVE 内、朝向在 STUCK_TURN 内
-# 持续 STUCK_SECONDS 就算卡住；再等 STUCK_DELAY 存回溯包（stuck_ 开头），两次自动保存至少隔 STUCK_COOLDOWN
+# 持续 STUCK_SECONDS 就算卡住；以判定卡住的那一刻为中心，存前 STUCK_BEFORE 秒 + 后 STUCK_AFTER 秒（go2w_ 开头，
+# 11-12 起 15 + 15 = 30 秒；原来是 2 秒后存最近 20 秒），两次自动保存至少隔 STUCK_COOLDOWN
 STUCK_SECONDS = float(os.environ.get('GO2W_STUCK_SECONDS', '8'))
 STUCK_MOVE, STUCK_TURN = 0.08, 0.15
-STUCK_DELAY, STUCK_COOLDOWN = 2.0, 60.0
+STUCK_BEFORE, STUCK_AFTER, STUCK_COOLDOWN = 15.0, 15.0, 60.0
 # 档位进程起来后，看到这些节点才算「运行中」
 MODE_NODES = {'mapping': ('slam_toolbox',), 'localization': ('amcl',), 'navigation': ('bt_navigator', 'go2w_cmd_bridge')}
 START_TIMEOUT = 90.0
@@ -1040,7 +1044,7 @@ class Server:
         self.motion_stops = 0
         try:
             with open(self.routes_file, encoding='utf-8') as f:
-                self.routes = {r['id']: self.route_record(r, r['id']) for r in json.load(f)}
+                self.routes = {r['id']: self.route_record(r, r['id'], strict=False) for r in json.load(f)}
         except FileNotFoundError:
             pass
         except (OSError, ValueError, TypeError, KeyError) as e:
@@ -1079,6 +1083,8 @@ class Server:
         self.auto_lie = False      # 空闲自动趴下生效（网页站起来过或跑过任务；遥控器站起来的不管）
         self.stand_hold = False    # 网页点了「保持站立」：不自动趴下，直到下次出发或手动趴下
         self.idle_since = None     # 开始空闲的时间
+        self.ctrl_online = None    # 运控在线状态（ctrl_watch 记变化）；None = 刚启动还没判断
+        self.t_start = time.monotonic()
         self.prep_hold_t = -1e9    # 网页自检最近一次说「我在自检」的时间
 
     # ---------- 工具 ----------
@@ -1457,12 +1463,36 @@ class Server:
             self.idle_since = None
             self.background(self.lie_down(f'空闲 {IDLE_LIE:.0f} s 自动', auto=True))
 
+    def ctrl_watch(self):
+        """运控在线 / 离线变化时记一条日志（网页上同时有横幅和提示）。后端启动 10 s 内还没收到不算离线。"""
+        if self.ctrl is None:
+            return
+        online = self.ctrl_get()[0] is not None
+        prev = self.ctrl_online
+        if prev is None:
+            if online:
+                self.ctrl_online = True
+            elif time.monotonic() - self.t_start > 10.0:
+                self.ctrl_online = False
+                self.node.event('ERROR', '运控离线：后端启动以来没有收到运控状态（/go2w_ctrl/state），'
+                                         '站起和出发都不可用。检查扩展坞上的 go2w-ctrl.service')
+            return
+        if prev and not online:
+            self.ctrl_online = False
+            self.node.event('ERROR', f'运控离线：超过 {CTRL_STALE:.0f} s 没有收到运控状态（/go2w_ctrl/state），'
+                                     '站起和出发都不可用。检查扩展坞上的 go2w-ctrl.service')
+        elif not prev and online:
+            self.ctrl_online = True
+            self.node.event('INFO', '运控已恢复：重新收到运控状态')
+
     def ctrl_view(self):
         if self.ctrl is None:
             return {'on': False}
         s, ready, seq = self.ctrl_get()
         left = None if self.idle_since is None else max(0.0, IDLE_LIE - (time.monotonic() - self.idle_since))
+        rx = self.ctrl.last_rx()
         return {'on': True, 'state': s, 'ready': ready, 'seq': seq, 'op': self.ctrl_op, 'msg': self.ctrl_msg,
+                'age': None if rx is None else round(time.monotonic() - rx, 1),   # 距最后一次收到运控状态多少秒；从没收到 = None
                 'stood': self.stood_seq, 'auto': self.auto_lie and IDLE_LIE > 0, 'hold': self.stand_hold,
                 'lieIn': None if left is None else round(left, 1)}
 
@@ -1485,7 +1515,7 @@ class Server:
         return points[i]
 
     @staticmethod
-    def route_record(d, route_id):
+    def route_record(d, route_id, strict=True):
         name, map_name, points = d['name'], d['map'], d['points']
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 60:
             raise ValueError('任务名称需要 1–60 个字符')
@@ -1506,7 +1536,35 @@ class Server:
                 raise ValueError('站点朝向类型无效')
             clean.append({'x': point['x'], 'y': point['y'], 'th': point['th'],
                           'name': label.strip(), 'manualHeading': manual})
-        return {'id': route_id, 'name': name.strip(), 'map': map_name, 'points': clean}
+        return {'id': route_id, 'name': name.strip(), 'map': map_name, 'points': clean,
+                'opts': Server.route_opts(d.get('opts'), strict)}
+
+    # 任务的运行参数（11-12 起跟任务一起保存）：循环、圈数（0 = 一直循环）、最大 vx / wz。老任务没有就用默认值
+    ROUTE_OPTS = {'loop': False, 'loops': 1, 'vmax': 0.45, 'wmax': 1.2}
+
+    @staticmethod
+    def route_opts(o, strict=True):
+        out = dict(Server.ROUTE_OPTS)
+        if o is None:
+            return out
+        if not isinstance(o, dict):
+            if strict:
+                raise ValueError('运行参数格式不对')
+            return out
+        checks = {'loop': lambda v: type(v) is bool,
+                  'loops': lambda v: type(v) is int and 0 <= v <= 1000,
+                  'vmax': lambda v: type(v) in (int, float) and math.isfinite(v) and 0.1 <= v <= 1.2,
+                  'wmax': lambda v: type(v) in (int, float) and math.isfinite(v) and 0.2 <= v <= 1.5}
+        msgs = {'loop': '循环开关无效', 'loops': '圈数需要 0–1000 的整数', 'vmax': '最大 vx 需要在 0.1–1.2 m/s 之间',
+                'wmax': '最大 wz 需要在 0.2–1.5 rad/s 之间'}
+        for k, ok in checks.items():
+            if k not in o:
+                continue
+            if ok(o[k]):
+                out[k] = float(o[k]) if k in ('vmax', 'wmax') else o[k]
+            elif strict:
+                raise ValueError(msgs[k])
+        return out
 
     def save_route(self, d):
         if self.routes_error:
@@ -1696,7 +1754,7 @@ class Server:
         self.auto_lie, self.stand_hold = True, False   # 任务结束后空闲 IDLE_LIE 秒自动趴下
         n = len(route['points'])
         self.route = {'record': route, 'index': 0, 'status': 'active', 'started': time.monotonic(),
-                      'message': '', 'stop': asyncio.Event(), 'goal': None, 'checking': True,
+                      'message': '', 'stop': asyncio.Event(), 'goal': None, 'checking': True,   # checking：出发前清代价地图中
                       # 循环：loops 为 None 表示单程；done = 已到达的站数，用来算进度。一圈到 n 站（含回到起点）
                       'loops': loops if round_trip else None, 'loop': 1, 'back': False, 'done': 0,
                       'total': n if not round_trip else None if loops == 0 else 1 + loops * n,
@@ -1937,23 +1995,7 @@ class Server:
                 first = self.route_next(len(points), loops, first)
                 route['done'] = 1
                 n.event('INFO', f'已在第 1 站附近（{near:.2f} m），直接前往第 2 站')
-            # 出发前检查一整圈（循环时含终点回起点那一段，后面几圈走的是同样的路段）
-            order, state = [], first
-            while state and state[1] == 1:
-                order.append(state)
-                state = self.route_next(len(points), loops, state)
-            check = {**record, 'points': [self.route_pose(points, i, back) for i, _, back in order]}
-            _, failed, reason = await self.plan_route(check, start, lambda: route['stop'].is_set() or n.nav_active())
-            if route['stop'].is_set():
-                return
-            if failed is not None:
-                route['index'] = order[failed - 1][0]
-                to = order[failed - 1][0] + 1
-                leg = f'当前位置 → 第 {to} 站' if failed == 1 else f'第 {order[failed - 2][0] + 1} → {to} 站'
-                if failed >= 2 and order[failed - 1][2]:
-                    leg = '回到起点（' + leg + '）'
-                self.finish_route(route, 'aborted', f'{leg}规划检查失败：{reason}')
-                return
+            # 11-12：不再出发前用 Nav2 规划检查整圈（用户：路线判断不需要）；某段规划不了，跑到那一段时 Nav2 会报失败
             route['checking'] = False
             state = first
             while state:
@@ -2128,11 +2170,11 @@ class Server:
             self.busy = False
 
     async def bag_start(self, name, topics):
-        """分段录包：每 BAG_SEGMENT 秒一个包，包名 = 前缀_MMDD_HHMMSS。name 是前缀，不填用 web。"""
-        name = name or 'web'
+        """分段录包：每 BAG_SEGMENT 秒一个包，包名 = 前缀_MMDD_HHMMSS。name 是前缀，不填用 BAG_PREFIX。"""
+        name = name or BAG_PREFIX
         if not P.SAFE_NAME.match(name) or len(name) > 30:
             return False, '包名前缀只能用字母、数字、下划线和减号，最多 30 个字符'
-        bad = [t for t in topics if not P.SAFE_TOPIC.match(t)]
+        bad = [t for t in topics if t != P.ALL_TOPICS and not P.SAFE_TOPIC.match(t)]
         if not topics or bad:
             return False, f"topic 写法不对：{' '.join(bad) or '（空）'}"
         if self.prof('bag') != 'stop':
@@ -2238,10 +2280,10 @@ class Server:
 
     def recording_names(self):
         """列表里正在写的包。网页录包是分段的：正在写的那段在 .recording 里，列表里的都已经写完，返回空。
-        命令行手动跑的 ros2 bag record 不知道名字，保险起见把最新的一个（回溯包除外）当成正在录。"""
+        命令行手动跑的 ros2 bag record 不知道名字，保险起见把最新的一个当成正在录（只是不自动删它）。"""
         if (self.procs_status or {}).get('bag_seg'):
             return set()
-        newest = next((b['name'] for b in self.bags if not b['name'].startswith(('snap_', 'stuck_'))), None)
+        newest = next((b['name'] for b in self.bags), None)
         return {newest}
 
     def rollback_set(self, on, who):
@@ -2292,7 +2334,7 @@ class Server:
                 n.event('WARN', '回溯录制进程退出了，正在重新启动。data/logs/rollback.log 最后几行：\n'
                         + P.tail(os.path.join(DATA, 'logs', 'rollback.log'), 6))
             self.rollback_t, self.rollback_started = now, True
-            await self.procs.start_rollback(ROLLBACK_SECONDS)
+            await self.procs.start_rollback(ROLLBACK_BUFFER)
         elif st.get('rollback') and not want:
             self.rollback_started = False
             await self.procs.stop_rollback()
@@ -2313,31 +2355,41 @@ class Server:
             n.event('WARN', f'导航中已经 {still:.0f} 秒没动了（{STUCK_COOLDOWN:.0f} 秒内已自动存过包，这次不存）')
             return
         self.stuck_t = now
-        n.event('WARN', f'导航中已经 {still:.0f} 秒没动了，还没到目标，{STUCK_DELAY:.0f} 秒后自动保存回溯包')
+        n.event('WARN', f'导航中已经 {still:.0f} 秒没动了，还没到目标，{STUCK_AFTER:.0f} 秒后自动保存回溯包'
+                        f'（卡住前 {STUCK_BEFORE:.0f} 秒 + 后 {STUCK_AFTER:.0f} 秒）')
 
         async def later():
-            await asyncio.sleep(STUCK_DELAY)
+            await asyncio.sleep(STUCK_AFTER)
+            waited = 0
             for _ in range(10):   # 正好有人在手动保存时等它存完
                 if not self.rollback_saving:
                     break
                 await asyncio.sleep(1.0)
-            await self.rollback_save('卡住自动保存', 'stuck_')
+                waited += 1
+            # 等手动保存时多过去的秒数也补上，起点仍是卡住前 STUCK_BEFORE 秒
+            await self.rollback_save('卡住自动保存', STUCK_BEFORE + STUCK_AFTER + waited)
         self.background(later())
 
-    async def rollback_save(self, who, prefix='snap_'):
+    async def rollback_save(self, who, seconds=ROLLBACK_SECONDS):
         if not (self.procs_status or {}).get('rollback'):
             return False, '回溯录制没在运行：先打开回溯，并启动建图 / 定位 / 导航'
         if self.rollback_saving:
             return False, '正在保存上一段，请稍等'
         self.rollback_saving = True
-        name, bags_dir = time.strftime(f'{prefix}%m%d_%H%M%S'), os.path.join(DATA, 'bags')
+        bags_dir = os.path.join(DATA, 'bags')
         work = os.path.join(bags_dir, '.rollback')
+        # 和分段录包同一个前缀，同一秒可能撞名：已有的包、正在录的段、正在存的回溯都避开，撞了加 _2
+        base = time.strftime(f'{BAG_PREFIX}_%m%d_%H%M%S')
+        name, k = base, 1
+        while any(os.path.exists(os.path.join(d, name)) for d in (bags_dir, work, os.path.join(bags_dir, '.recording'))):
+            k += 1
+            name = f'{base}_{k}'
         error, done = os.path.join(work, f'{name}.error'), os.path.join(bags_dir, name, 'metadata.yaml')
         try:
             os.makedirs(work, exist_ok=True)
             tmp = os.path.join(work, 'request.tmp')
             with open(tmp, 'w') as f:
-                f.write(name)
+                f.write(f'{name} {float(seconds)}')
             os.replace(tmp, os.path.join(work, 'request'))
             t0 = time.monotonic()
             while time.monotonic() - t0 < ROLLBACK_SAVE_TIMEOUT:
@@ -2687,7 +2739,7 @@ class Server:
                 elif d.get('t') == 'teleop':
                     self.on_teleop(ws, d)
                 elif d.get('t') == 'cam':
-                    r = await self.camera.request(ws, remote, bool(d.get('on')), bool(d.get('take')))
+                    r = await self.camera.request(ws, remote, bool(d.get('on')))
                     await ws.send_str(json.dumps({'t': 'cam', **r}))
                 elif d.get('t') == 'inspect' and isinstance(d.get('topic'), str):
                     self.set_inspect(ws, d['topic'], bool(d.get('on')))
@@ -2755,6 +2807,7 @@ class Server:
                         await self.disarm_and_cancel(f'机器狗不在行走状态（运控状态 {s}）')
                 if k % 5 == 0:
                     self.idle_tick()
+                    self.ctrl_watch()
                 # 急停期间底盘被别处解锁（nav.sh arm 等）→ 再次上锁。
                 # 只认急停 1 s 之后收到的「已解锁」，避免把上锁之前的旧状态当成又被解锁
                 if self.estop and n.is_armed() and n.armed_t > self.estop_t + 1.0 and k % 5 == 0:

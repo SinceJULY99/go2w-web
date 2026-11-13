@@ -49,17 +49,20 @@ async def tick():
                               stuck=W.StuckWatch(seconds=0.2), stuck_t=-W.STUCK_COOLDOWN, pending=set())
     s.background = lambda c: W.Server.background(s, c)
 
-    async def save(who, prefix='snap_'):
-        saves.append((who, prefix))
+    async def save(who, seconds=None):
+        saves.append(who)
+        secs.append(seconds)
+    secs = []
     s.rollback_save = save
-    W.STUCK_DELAY = 0.1
+    W.STUCK_AFTER = 0.1
     tick = lambda: W.Server.stuck_tick(s)
     tick()
     await asyncio.sleep(0.25)
     node.odom_pose = (1.0, 2.0, 0.0, W.time.monotonic())
     tick()
     await asyncio.sleep(0.2)
-    check('卡住后自动保存 stuck_', saves == [('卡住自动保存', 'stuck_')])
+    check('卡住后自动保存', saves == ['卡住自动保存'])
+    check(f'存 前 15 秒 + 后 0.1 秒 {secs}', secs == [W.STUCK_BEFORE + 0.1])
     check('先报警告', any(lv == 'WARN' and '没动' in m for lv, m in events))
     # 冷却期内再次卡住：只报警告不存
     s.stuck = W.StuckWatch(seconds=0.2)

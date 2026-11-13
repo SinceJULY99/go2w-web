@@ -51,7 +51,7 @@ async def main():
     st = await d.status(); check('识别录包', st['bag'], st)
     await d.stop_bag(); await asyncio.sleep(0.2); check('stop_bag 停掉录包', bag.poll() is not None, bag.poll())
     check('stop_bag 不影响导航', nav.poll() is None)
-    seg = fake(['/go2w/scripts/segment_recorder.py', '--prefix', 'web', '/odom']); await asyncio.sleep(0.2)
+    seg = fake(['/go2w/scripts/segment_recorder.py', '--prefix', 'go2w', '/odom']); await asyncio.sleep(0.2)
     st = await d.status(); check('识别分段录包', st['bag'], st)
     await d.stop_bag(); await asyncio.sleep(0.2); check('stop_bag 停掉分段录包', seg.poll() is not None, seg.poll())
     await d.stop_patrol(); await asyncio.sleep(0.2); check('stop_patrol 停掉巡逻', pat.poll() is not None)
@@ -69,6 +69,18 @@ async def main():
             await fn(bad); check(f'拒绝 {bad}', False)
         except AssertionError:
             check(f'拒绝 {bad}', True)
+    # * = 录所有 topic：转成 --all，不能把 * 原样交给 shell（会被展开成文件名）
+    for topics, want in ((['*'], ' --all '), (['*', '/odom'], ' --all /odom '), (['/odom', '/scan'], ' /odom /scan ')):
+        await d.start_bag('t', topics); cmd = calls[-1][1]['Cmd'][2]
+        check(f'start_bag {topics}', 'segment_recorder.py' in cmd and want in cmd and '*' not in cmd, cmd[-120:])
+    for bad in (['**'], ['*;id'], []):
+        try:
+            await d.start_bag('t', bad); check(f'拒绝 topic {bad}', False)
+        except AssertionError:
+            check(f'拒绝 topic {bad}', True)
+    await d.start_rollback(20); cmd = calls[-1][1]['Cmd'][2]
+    check('回溯录制录所有 topic', 'rollback_recorder.py --seconds 20.0 --all >' in cmd, cmd[-100:])
+    await asyncio.sleep(0.3)
     n0 = len(calls); await d.start_mode('navigation', 'lab'); cmd = calls[-1][1]['Cmd'][2]
     await asyncio.sleep(0.2)
     check('启动命令和 nav.sh 一致', 'ros2 launch go2w_bringup navigation.launch.py map:=/go2w/data/maps/lab.yaml' in cmd and 'ros_env' in cmd, cmd[-110:])

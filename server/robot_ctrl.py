@@ -75,6 +75,11 @@ class CtrlLink:
             return None, False, seq
         return state, ready, seq
 
+    def last_rx(self):
+        """最后一次收到运控状态的时间（monotonic）；从没收到过时 None。"""
+        t = self.snap[3]
+        return t if t > 0 else None
+
     def steady_since(self):
         """当前状态 ready 起的时间（monotonic）；没 ready 时 None。"""
         return self.steady_t

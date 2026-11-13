@@ -279,7 +279,7 @@ export function createMockSource(store, bus){
   function bagSegment(d){
     if (d < .5) return;
     const t0 = new Date(Date.now() - d*1000), p = n => String(n).padStart(2,'0');
-    store.bags.unshift({ name:`web_${p(t0.getMonth()+1)}${p(t0.getDate())}_${p(t0.getHours())}${p(t0.getMinutes())}${p(t0.getSeconds())}`, dur:d, size:d*4.6 });
+    store.bags.unshift({ name:`go2w-01_${p(t0.getMonth()+1)}${p(t0.getDate())}_${p(t0.getHours())}${p(t0.getMinutes())}${p(t0.getSeconds())}`, dur:d, size:d*4.6 });
     S.bagT0 = S.t;
   }
   function onDown(id){
@@ -334,9 +334,10 @@ export function createMockSource(store, bus){
       try { localStorage.setItem(viewsKey, JSON.stringify(views)); } catch {}
       return { ok:true };
     },
-    saveRoute({ route_id, name, map, points }){
+    saveRoute({ route_id, name, map, points, opts }){
       const id = route_id || globalThis.crypto?.randomUUID?.() || `mock-${Date.now()}-${Math.random()}`;
-      const record = { id, name:name.trim(), map, points:points.map(p => ({ ...p, name:(p.name || '').trim() })) };
+      const record = { id, name:name.trim(), map, points:points.map(p => ({ ...p, name:(p.name || '').trim() })),
+        opts:{ loop:false, loops:1, vmax:0.45, wmax:1.2, ...(opts || {}) } };
       const routes = route_id ? store.routes.map(r => r.id === id ? record : r) : [...store.routes, record];
       try {
         localStorage.setItem(routesKey, JSON.stringify(routes));
@@ -352,7 +353,7 @@ export function createMockSource(store, bus){
     },
     saveRollback(){
       if (!store.rollback.run) return { ok:false, msg:'回溯录制没在运行' };
-      const name = `snap_${new Date().toTimeString().slice(0,8).replace(/:/g,'')}`;
+      const name = `go2w-01_${new Date().toTimeString().slice(0,8).replace(/:/g,'')}`;
       store.bags = [{ name, dur:store.rollback.seconds, size:86 }, ...store.bags];
       return { ok:true, msg:`已保存回溯 ${name}（模拟）` };
     },

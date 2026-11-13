@@ -18,7 +18,7 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
   function appendLog(l){
     const r = document.createElement('div'); r.className = 'lrow ' + l.level;
     r.innerHTML = `<span class="lt">${l.t}</span><span class="lv ${l.level}">${l.level}</span><span class="ln"></span><span class="lm"></span>`;
-    r.children[2].textContent = `[${l.node}]`; r.lastChild.textContent = l.msg; logEl.appendChild(r);
+    r.children[2].textContent = `[${l.node}]`; r.children[2].title = l.node; r.lastChild.textContent = l.msg; logEl.appendChild(r);
     while (logEl.children.length > 300) logEl.firstChild.remove();
     logEl.scrollTop = logEl.scrollHeight;
   }
@@ -142,11 +142,12 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
     const pill = $('#taskPill'); pill.dataset.s = st; pill.textContent = label;
     $('#btnPause').disabled = idle || done || !src.can('pause') || T.type === 'route'; $('#btnPause').textContent = T.paused ? '继续' : '暂停';
     $('#btnCancel').disabled = idle || done;
+    $('#taskSpeed').hidden = idle || done;          // 临时调速：只在任务执行中
     if (idle) return;
     if (T.type==='route'){
       $('#taskTitle').textContent = T.name;
       const lap = !T.roundTrip ? '' : `${T.loops ? `第 ${T.loop} / ${T.loops} 圈` : `第 ${T.loop} 圈（一直循环）`}${T.back ? ' · 回到起点' : ''} · `;
-      $('#taskSub').textContent = T.message || (T.phase === 'checking' ? '正在检查出发路线' : `${lap}正在前往第 ${T.point} / ${T.count} 站${T.pointName ? ' · ' + T.pointName : ''}`);
+      $('#taskSub').textContent = T.message || (T.phase === 'checking' ? '出发前清除旧障碍标记' : `${lap}正在前往第 ${T.point} / ${T.count} 站${T.pointName ? ' · ' + T.pointName : ''}`);
     }
     else if (T.type==='external'){ $('#taskTitle').textContent = '外部导航目标'; $('#taskSub').textContent = 'RViz 或命令行发出的目标 ·「取消」同样有效'; }
     else { const g = T.goal; $('#taskTitle').textContent = '单点导航'; $('#taskSub').textContent = `目标 (${g.x.toFixed(2)}, ${g.y.toFixed(2)}) · ${deg(g.th).toFixed(0)}°`; }
@@ -178,9 +179,9 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
   $('#armBtn').onclick = () => actions.arm();
   $('#estopBtn').onclick = () => actions.estop();
   $('#estopRelease').onclick = () => actions.releaseEstop();
-  // 滑条平时跟着实际参数走（真机上来自 cmd_bridge）；拖动中不打断，松手后发设置，失败就弹回实际值。
-  // cmd_bridge 没在跑（导航没开时在第 4 步选参数）：先记在滑条上（held），出发时随任务带给后端；
-  // 期间导航起来了就立刻设过去
+  // 「导航任务」卡片上的临时调速 + 调试区的指令超时：滑条平时跟着实际参数走（真机上来自 cmd_bridge）；
+  // 拖动中不打断，松手后立即设给 cmd_bridge，只影响这次运行（任务里保存的参数不变），失败就弹回实际值。
+  // cmd_bridge 没在跑时先记在滑条上（held），起来了再设过去
   const bridgeUp = () => store.source !== 'ros' || run('navigation') || run('bridge');
   const sliders = [['#slV','#oV','vmax','m/s',2], ['#slW','#oW','wmax','rad/s',1], ['#slT','#oT','tmo','s',1]].map(([id, out, key, unit, dec]) => {
     const el = $(id), show = v => $(out).textContent = `${(+v).toFixed(dec)} ${unit}`;
@@ -206,13 +207,13 @@ export function createPanels(store, src, actions, mapView, bus, setTool){
     const C = store.ctrl, on = !!C?.on && store.link.ok;
     $('#chPose').hidden = $('#poseRow').hidden = !on;
     if (!on) return;
-    const name = C.state == null ? '未知' : POSE[C.state] || String(C.state).replace(/[<>&"]/g, '');
+    const name = C.state == null ? '运控离线' : POSE[C.state] || String(C.state).replace(/[<>&"]/g, '');
     const txt = C.op === 'up' ? '站起中…' : C.op === 'down' ? '趴下中…' : C.state === 'FixStand' && !C.ready ? '站起中…'
       : C.lieIn != null ? `${Math.ceil(C.lieIn)} s 后趴下` : name;
     chip('#chPose', C.state == null ? 'crit' : C.op || C.lieIn != null ? 'warn' : C.state === 'Velocity' ? 'ok' : '', txt);
     const pt = $('#poseTxt');
     pt.className = 'pose-txt' + (C.lieIn != null ? ' warn' : '');
-    pt.innerHTML = C.state == null ? '<b>收不到运控状态</b>'
+    pt.innerHTML = C.state == null ? '<b class="crit">运控离线</b> · 收不到运控状态'
       : C.lieIn != null ? `空闲 · <b>${Math.ceil(C.lieIn)} s 后原地趴下</b>`
       : `姿态 <b>${txt}</b>${C.hold ? ' · 保持站立' : ''}`;
     const busy = !!C.op || C.state == null;

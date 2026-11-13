@@ -1,6 +1,6 @@
 // 右栏「任务」：导航 / 重定位 / 建图三个标签 + 导航的五步流程（原型见 web/prototype/right_panel.html）
-// 导航（11-11 改）：地图 → 任务 → 参数 → 出发前自检 → 出发。前三步不用开导航（后端直接读地图文件显示）；
-// 第 3 步「开始自检」才启动导航、自动定位、用 Nav2 检查路径，全部通过后「出发」才能点。
+// 导航（11-12 改）：1 地图 → 2 导航任务（路线 + 运行参数 + 出发按钮）。选图、编辑任务都不用开导航（后端直接读地图文件）；
+// 点「出发」后自动：站立 → 启动导航（或切图）→ 自动定位 → 解锁并下发任务。不再用 Nav2 预先检查站间路径。
 // 建图 / 重定位标签照旧：点标签就切换机器人档位，切换时先停车（取消任务、底盘上锁）。
 import { $, $$, deg } from './util.js';
 import { toast, formBox, stillCheck } from './ui.js';
@@ -56,7 +56,7 @@ export function setupFlow(store, src, actions, setTool, reloc){
     if (tab() === 'reloc' && t !== 'reloc' && reloc.changed()) return reloc.leave(() => switchTo(t));
     const b = busyMsg(); if (b) return toast(b, 'warn');
     if (t === 'nav'){
-      // 导航不在这里启动：显示五步流程，第 3 步自检时再启动
+      // 导航不在这里启动：点「出发」时再启动
       if (up('mapping')){
         const saved = store.mapSavedName;
         return formBox({ title: '停止建图', body: `切到导航会停止建图${saved ? `，之后用刚保存的 ${saved}` : ''}。`, warn: leavingMapWarn(),
@@ -90,7 +90,7 @@ export function setupFlow(store, src, actions, setTool, reloc){
   const pickMap = () => { const v = mapSel.value; if (v && v !== store.mapCurrent) actions.loadMap(v); };
   $('#navMapLoad').onclick = pickMap;
   mapSel.onchange = () => { if (!up('navigation') && !up('localization')) pickMap(); };
-  // 定位（第 3 步里失败时手动补救）
+  // 定位（出发流程里定位失败时手动补救）
   $('#navInitBtn').onclick = () => setTool('init');
   $('#navInitOk').onclick = () => { store.initPose = { manual: true, map: store.mapCurrent }; render(); };
   // 地图工具栏发出的初始位姿成功后算定位完成（actions.initialPose 会调这个）
@@ -119,64 +119,60 @@ export function setupFlow(store, src, actions, setTool, reloc){
     $('#navAutoBtn').textContent = $('#relocAuto').textContent = busy ? '定位中…' : '自动定位';
   }
 
-  // ---------- 第 3 步：出发前自检 ----------
-  // 站立（趴着就站起来、启动策略）→ 导航（没开就用任务的地图启动；开着但图不对就切图）→ 自动定位 → Nav2 检查站间路径。
-  // 每一项都从后端推来的状态判断，全部通过后 store.prepOk(任务) 为真，「出发」才能点（actions.routeStartBlocker）。
-  // 自检通过后：导航停了、定位作废、任务改了、出发了，都要重新自检。
+  // ---------- 出发流程 ----------
+  // 点「出发」后：站立（趴着就站起来、启动策略）→ 导航（没开就用任务的地图启动；开着但图不对就切图）→ 自动定位 → 解锁并下发任务。
+  // 已经满足的步骤直接跳过。每一步都从后端推来的状态判断；失败就停在那一步，给出原因（定位失败可以手动补救，补好后自动继续）。
+  // prep.step：stand / nav / loc / go；store.prep 给地图右上角的状态牌看
   const prep = { on: false };
-  const sig = r => r ? `${r.id}|${r.map}|${JSON.stringify(r.points)}` : '';
-  const curRoute = () => store.routes.find(r => r.id === $('#routeSelect').value && r.map === store.mapCurrent) || null;
+  const STEP_NAME = { stand: '站立', nav: '启动导航', loc: '定位', go: '下发任务' };
   function resetPrep(){ for (const k of Object.keys(prep)) delete prep[k]; prep.on = false; }
-  store.prepOk = route => !!(prep.on && prep.done && !prep.fail && route && prep.sig === sig(route) && run('navigation') && store.initPose && actions.walking());
-  // 自检进行中（以及通过后 2 分钟内等出发）每 2 s 告诉后端，别把这段时间当空闲自动趴下
-  const PREP_HOLD_MS = 120000;
+  store.prep = () => prep.on ? { on: true, step: prep.step, name: STEP_NAME[prep.step] || '', fail: prep.fail, route: prep.routeName } : null;
+  // 出发流程进行中每 2 s 告诉后端，别把这段时间当空闲自动趴下
   function prepHold(now){
-    if (!prep.on || prep.fail || (prep.doneT && now - prep.doneT > PREP_HOLD_MS) || now - (prep.holdT || 0) < 2000) return;
+    if (!prep.on || prep.fail || now - (prep.holdT || 0) < 2000) return;
     prep.holdT = now;
     if (src.can('prepHold')) src.cmd.prepHold();
   }
-  function prepFail(k, msg, soft = false){ prep.fail = { k, msg, soft }; prep.done = false; }
+  function prepFail(k, msg, soft = false){ prep.fail = { k, msg, soft }; }
 
-  function startPrep(){
-    const route = curRoute();
-    if (!route) return toast('先在第 2 步选择（或保存）一个任务', 'warn');
-    if (store.routeDraft.points.length && (store.routeDraft.id !== route.id || !store.routeDraft.confirmed)) return toast('第 2 步的路线还没保存', 'warn');
-    if (up('mapping')) return toast('先停止建图', 'warn');
-    const b = busyMsg(); if (b) return toast(b, 'warn');
-    if (store.estop) return toast('急停中：先解除急停', 'warn');
+  // routes.js 的「出发」按钮调这个（参数没保存的已经先保存好了）
+  function startGo(route){
+    if (!route) return toast('先选择（或保存）一个任务', 'warn');
+    const b = actions.routeGoBlocker(route) || busyMsg(); if (b) return toast(b, 'warn');
+    if (prep.on && !prep.fail) return;
     const begin = () => {
       resetPrep();
-      Object.assign(prep, { on: true, done: false, fail: null, route: route.id, sig: sig(route), map: route.map, t0: Date.now(),
-        seq0: store.autoLoc?.seq ?? -1, standT: 0, standOk: false, doneT: 0, holdT: 0, navT: 0, runT: 0, loadT: 0, autoT: 0, check: null, retried: false });
-      openSteps.add('stPrep');
+      Object.assign(prep, { on: true, fail: null, step: 'stand', route: route.id, routeName: route.name, map: route.map, t0: Date.now(),
+        seq0: store.autoLoc?.seq ?? -1, standT: 0, standOk: false, holdT: 0, navT: 0, runT: 0, loadT: 0, autoT: 0, goT: 0 });
       render();
     };
     if (up('navigation')) return begin();
     // 要启动导航：FAST-LIO 初始化时机器人要站好不动
-    formBox({ title: '出发前自检', ok: '开始自检',
-      body: `将用地图 ${route.map} 启动导航（约 10–20 秒），然后自动定位、检查路径。${up('localization') ? '当前的「定位」档位会先停掉。' : ''}`,
+    formBox({ title: '出发', ok: '出发',
+      body: `将${store.ctrl?.on && store.ctrl.state !== 'Velocity' ? '让机器狗站起来，' : ''}用地图 ${route.map} 启动导航（约 10–20 秒），自动定位后解锁底盘出发。${up('localization') ? '当前的「定位」档位会先停掉。' : ''}`,
       build: f => stillCheck(f), valid: f => f.querySelector('[data-still]').checked, onOk: begin });
   }
-  $('#prepRun').onclick = startPrep;
-  $('#prepStop').onclick = () => { resetPrep(); render(); };
+  store.startGo = startGo;
+  $('#prepStop').onclick = () => { resetPrep(); render(); toast('已取消出发', 'warn'); };
+  $('#prepRetry').onclick = () => { const r = store.routes.find(x => x.id === prep.route); resetPrep(); startGo(r); };
 
   function prepTick(){
     if (!prep.on) return;
-    if (routeActive()){ resetPrep(); return; }                // 已经出发：这次自检用掉了
     if (prep.fail){
       if (prep.fail.k === 'loc' && store.initPose && run('navigation')) prep.fail = null;   // 手动补救了定位，接着往下走
       else return;
     }
     const route = store.routes.find(r => r.id === prep.route);
-    if (!route || sig(route) !== prep.sig) return prepFail('route', '任务改过了，请重新自检');
-    if (store.estop) return prepFail('nav', '急停中');
+    if (!route) return prepFail('go', '任务被删除了');
+    if (store.estop) return prepFail(prep.step, '急停中');
     const now = Date.now();
     prepHold(now);
-    // 0 站立：导航启动（FAST-LIO 初始化）和定位都要在站好之后做
+    // 1 站立：导航启动（FAST-LIO 初始化）和定位都要在站好之后做
+    prep.step = 'stand';
     const C = store.ctrl;
     if (C?.on){
       if (!(C.state === 'Velocity' && C.ready)){
-        if (prep.standOk) return prepFail('stand', C.state ? `机器狗不在行走状态（${C.state}），请重新自检` : '收不到运控状态，请重新自检');
+        if (prep.standOk) return prepFail('stand', C.state ? `机器狗不在行走状态（${C.state}）` : '收不到运控状态');
         if (C.state == null) return prepFail('stand', '收不到运控状态：go2w-ctrl.service 没在运行？');
         if (!prep.standT){
           prep.standT = now;
@@ -189,7 +185,8 @@ export function setupFlow(store, src, actions, setTool, reloc){
       }
       prep.standOk = true;
     }
-    // 1 导航
+    // 2 导航
+    prep.step = 'nav';
     if (!run('navigation')){
       if (prep.runT) return prepFail('nav', '导航停了');
       if (up('navigation') || store.busy) return;              // 启动中
@@ -204,14 +201,14 @@ export function setupFlow(store, src, actions, setTool, reloc){
       if (now - prep.loadT > 15000) prepFail('nav', `切换到地图 ${prep.map} 没有成功`);
       return;
     }
-    // 2 定位
+    // 3 定位
+    prep.step = 'loc';
     if (!store.initPose){
-      if (prep.done) return prepFail('loc', '定位作废了（换过地图或导航重启），请重新自检');
       if (store.source !== 'ros'){ store.initPose = { auto: true, map: store.mapCurrent }; return; }   // 模拟：定位没有误差
       const a = store.autoLoc;
       if (a?.state === 'run') return;
       if (a && a.seq > prep.seq0 && a.map === prep.map && a.state === 'fail') return prepFail('loc', a.msg || '自动定位失败', true);
-      // 自检启动的导航：后端起来后会自动定位一次，等它（最多 40 s）；导航本来就开着就自己请求
+      // 这次启动的导航：后端起来后会自动定位一次，等它（最多 40 s）；导航本来就开着就自己请求
       if (prep.navT && !prep.autoT && (!a || a.state === 'idle') && now - prep.runT < 40000) return;
       if (!prep.autoT){
         prep.autoT = now;
@@ -227,71 +224,46 @@ export function setupFlow(store, src, actions, setTool, reloc){
       if (now - prep.autoT > 110000) prepFail('loc', '自动定位没有结果', true);
       return;
     }
-    // 3 路径检查
-    if (!prep.check){
-      if (store.source !== 'ros'){ prep.check = { state: 'ok', msg: '本地模拟，没有用 Nav2 检查' }; return; }
-      prep.check = { state: 'run' };
-      const t0 = prep.t0;
-      actions.checkRoute(route).then(r => {
-        if (!prep.on || prep.t0 !== t0) return;
-        if (r?.ok){
-          prep.check = { state: 'ok', msg: r.msg || '全部站间路径可规划' };
-          // 地图上画出检查过的路径（第 2 步正在看这条任务时）
-          if (store.routeDraft.id === route.id && store.routeDraft.confirmed)
-            store.routeCheck = { draft: store.routeDraft, pending: false, paths: r.data?.paths, message: r.msg };
-        } else if (!prep.retried && /未就绪|没有运行/.test(r?.msg || '')){
-          prep.retried = true;                                  // Nav2 刚起来，规划器可能还差一点：3 s 后再试一次
-          setTimeout(() => { if (prep.on && prep.t0 === t0){ prep.check = null; render(); } }, 3000);
-        } else {
-          prep.check = { state: 'fail', msg: r?.msg || '检查失败' };
-          prepFail('route', prep.check.msg);
-        }
-        render();
-      });
-      return;
-    }
-    if (prep.check.state === 'ok'){ prep.done = true; prep.doneT ||= now; }
+    // 4 解锁并下发任务（定位可能不准时 actions.startRoute 会再问一句）
+    prep.step = 'go';
+    if (prep.goT) return;
+    if (!store.odomOk || !store.robot.valid || store.fixed !== 'map') return;   // 等里程计和 map 坐标系
+    prep.goT = now;
+    const t0 = prep.t0, o = route.opts || {};
+    Promise.resolve(actions.startRoute(route, { roundTrip: !!o.loop, loops: o.loops ?? 1, vmax: o.vmax, wmax: o.wmax })).then(r => {
+      if (!prep.on || prep.t0 !== t0) return;
+      if (r?.ok) resetPrep();                                   // 出发了：进度看「导航任务」卡片
+      else prepFail('go', r == null ? '已取消出发' : r.msg || '任务没有下发成功', true);
+      render();
+    });
   }
 
-  function prepRender(route){
-    const F = prep.fail, R = store.robot, m = store.loc.match;
-    const navHere = run('navigation') && liveMap() && store.mapCurrent === route?.map;
-    const C = store.ctrl;
-    const items = {
-      stand: !C?.on ? ['skip', store.source === 'ros' ? '运控状态未接入（GO2W_CTRL=0）：用遥控器站起来' : '模拟：没有运控']
-        : F?.k === 'stand' ? ['fail', F.msg]
-        : C.op === 'up' ? ['run', '站起中…（站稳约 2 s，再启动策略）']
-        : C.op === 'down' ? ['run', '趴下中…']
-        : C.state === 'Velocity' && C.ready ? ['ok', '已站起，策略运行中']
-        : C.state == null ? ['todo', '收不到运控状态']
-        : ['todo', C.state === 'Passive' ? '趴着，自检时自动站起' : C.state === 'FixStand' ? '站着（策略未接管），自检时启动策略' : C.state],
-      nav: F?.k === 'nav' ? ['fail', F.msg]
-        : navHere ? ['ok', `运行中 · ${store.mapCurrent}`]
-        : prep.on && prep.loadT ? ['run', `切换到地图 ${prep.map}…`]
-        : prep.on || up('navigation') ? ['run', run('navigation') ? '等待地图…' : '启动中…（机器人保持静止）']
-        : ['todo', run('localization') ? '只开了定位，自检时启动导航' : '没有运行，自检时自动启动'],
-      loc: F?.k === 'loc' ? ['fail', F.msg]
-        : store.initPose && navHere ? ['ok', `(${R.x.toFixed(2)}, ${R.y.toFixed(2)}) · ${Math.round(deg(R.th)) || 0}°${m != null ? ` · 匹配率 ${m.toFixed(0)}%` : ''}`]
-        : store.autoLoc?.state === 'run' ? ['run', '定位中…（机器人保持静止）']
-        : prep.on && navHere ? ['run', '等待自动定位…']
-        : ['todo', '导航启动后自动定位'],
-      route: F?.k === 'route' ? ['fail', F.msg]
-        : prep.check?.state === 'ok' ? ['ok', prep.check.msg]
-        : prep.check?.state === 'run' ? ['run', '检查中…']
-        : ['todo', '用 Nav2 规划每一段站间路径'],
+  function prepRender(){
+    const box = $('#prepList'), F = prep.fail, R = store.robot, m = store.loc.match;
+    box.hidden = !prep.on;
+    $('#prepBtns').hidden = !prep.on;
+    $('#prepRetry').hidden = !F;
+    $('#prepStop').textContent = F ? '关闭' : '取消出发';
+    const C = store.ctrl, order = ['stand', 'nav', 'loc', 'go'], cur = order.indexOf(prep.step);
+    const st = k => { const i = order.indexOf(k); return F?.k === k ? 'fail' : i < cur ? 'ok' : i === cur && prep.on ? 'run' : 'todo'; };
+    const navHere = run('navigation') && liveMap() && store.mapCurrent === prep.map;
+    const text = {
+      stand: !C?.on ? (store.source === 'ros' ? '运控状态未接入（GO2W_CTRL=0）：用遥控器站起来' : '模拟：没有运控')
+        : C.op === 'up' ? '站起中…（站稳约 2 s，再启动策略）'
+        : C.state === 'Velocity' && C.ready ? '已站起，策略运行中'
+        : C.state === 'Passive' ? '趴着，站起来' : C.state === 'FixStand' ? '站着，启动策略' : C.state || '收不到运控状态',
+      nav: navHere ? `运行中 · ${store.mapCurrent}` : prep.loadT ? `切换到地图 ${prep.map}…` : run('navigation') ? '等待地图…' : '启动中…（机器人保持静止）',
+      loc: store.initPose && navHere ? `(${R.x.toFixed(2)}, ${R.y.toFixed(2)}) · ${Math.round(deg(R.th)) || 0}°${m != null ? ` · 匹配率 ${m.toFixed(0)}%` : ''}`
+        : store.autoLoc?.state === 'run' ? '定位中…（机器人保持静止）' : '等待自动定位…',
+      go: prep.goT ? '解锁底盘，下发任务…' : '定位好后自动出发',
     };
     for (const li of $$('#prepList li')){
-      const [s, t] = items[li.dataset.k];
+      const k = li.dataset.k, s = st(k), t = F?.k === k ? F.msg : s === 'todo' ? '' : text[k];
       if (li.dataset.s !== s) li.dataset.s = s;
       const sm = li.querySelector('small'); if (sm.textContent !== t) sm.textContent = t;
     }
-    const running = prep.on && !prep.done && !F;
-    $('#prepRun').hidden = running;
-    $('#prepRun').textContent = prep.done || F ? '重新自检' : '开始自检';
-    $('#prepRun').disabled = !route || !!store.busy;
-    $('#prepStop').hidden = !running;
-    // 定位失败（或导航开着但还没定位）时给手动补救的按钮
-    $('#prepLocRow').hidden = !(navHere && !store.initPose && (F?.k === 'loc' || !prep.on));
+    // 定位失败时给手动补救的按钮；补好后流程自动继续
+    $('#prepLocRow').hidden = !(prep.on && F?.k === 'loc' && navHere && !store.initPose);
     $('#navInitOk').hidden = !R.valid || store.fixed !== 'map';
   }
 
@@ -313,7 +285,7 @@ export function setupFlow(store, src, actions, setTool, reloc){
     if (el.dataset.s !== state) el.dataset.s = state;
     el.classList.toggle('open', state === 'done' && openSteps.has(id));
     const more = el.querySelector('.step-more');
-    if (more){ more.hidden = state !== 'done'; more.textContent = openSteps.has(id) ? '收起' : id === 'stPrep' ? '详情' : '更改'; }
+    if (more){ more.hidden = state !== 'done'; more.textContent = openSteps.has(id) ? '收起' : '更改'; }
     const s = $('#' + id + 'Sub'); if (s.textContent !== sub) s.textContent = sub;
   }
   let lastMaps, lastNav, lastMapCur, lastStood;
@@ -322,7 +294,7 @@ export function setupFlow(store, src, actions, setTool, reloc){
     const navOn = run('navigation');
     if (!navOn && lastNav) store.initPose = null;
     lastNav = navOn;
-    // 从趴着站起来：雷达的高度和姿态变了，定位要重新做（自检会自动定位）
+    // 从趴着站起来：雷达的高度和姿态变了，定位要重新做（出发流程会自动定位）
     const stood = store.ctrl?.stood;
     if (stood != null && lastStood != null && stood !== lastStood) store.initPose = null;
     if (stood != null) lastStood = stood;
@@ -365,34 +337,25 @@ export function setupFlow(store, src, actions, setTool, reloc){
       const navLive = up('navigation') || up('localization');
       setStep('stMap', mapOk ? 'done' : 'cur', mapOk ? `${store.mapCurrent}${navLive ? ' · 导航在用' : ''}` : '等待地图');
       $('#navMapHint').textContent = navLive
-        ? '导航正在用这张图：换图后 map_server 立即加载新图，要重新定位（重新自检）。'
-        : '导航不用先开：选好地图就能编辑任务，出发前自检时用这张图启动导航。';
+        ? '导航正在用这张图：换图后 map_server 立即加载新图，要重新定位。'
+        : '导航不用先开：选好地图就能编辑任务，点「出发」时用这张图启动导航。';
       $('#navMapLoad').hidden = !navLive;       // 导航没开时选了就换
-      // 2 导航任务（routes.js 管里面的内容）
+      // 2 导航任务：路线 + 运行参数 + 出发（routes.js 管里面的内容），选好地图后一直展开
       const sel = $('#routeSelect').value, route = store.routes.find(r => r.id === sel && r.map === store.mapCurrent);
       const draft = store.routeDraft, editing = draft.points.length && (!route || draft.id !== route.id || !draft.confirmed);
-      const routeOk = mapOk && route && !editing;
-      setStep('stRoute', !mapOk ? 'todo' : routeOk ? 'done' : 'cur',
-        route ? `${route.name} · ${route.points.length} 站` : editing ? '正在编辑新路线' : store.routes.some(r => r.map === store.mapCurrent) ? '选择一个任务' : '这张地图还没有任务，点「新建」');
-      // 3 出发前自检
-      if (prep.on && route && prep.route !== route.id) resetPrep();   // 换了任务：上一次自检不算
-      prepRender(routeOk ? route : null);
-      const ok = routeOk && store.prepOk(route);
-      setStep('stPrep', !routeOk ? 'todo' : ok ? 'done' : 'cur',
-        ok ? '全部通过' : prep.fail ? `未通过：${prep.fail.msg}` : prep.on ? '自检中…' : '站立 → 导航 → 定位 → 路径检查');
-      if (ok && !prep.shown){ prep.shown = true; openSteps.delete('stPrep'); }
-      // 4 运行参数：自检通过后才展开，和「出发」一起停在眼前（11-11 修：原来任务一选好就标成完成并收起，看起来被跳过了）
-      // 导航没开时先记在滑条上，出发时带给后端
-      const round = $('#routeRound').checked, loops = +$('#routeLoops').value || 0;
-      setStep('stParam', ok ? 'cur' : 'todo',
-        `${round ? (loops ? `循环 ${loops} 圈` : '一直循环') : '单程'} · ${(+$('#slV').value).toFixed(2)} m/s · ${(+$('#slW').value).toFixed(1)} rad/s`);
-      // 5 出发
-      setStep('stGo', ok ? 'cur' : 'todo', ok ? '自检通过，可以出发' : '先完成出发前自检');
+      // 用户换选了别的任务：这次出发作废（启动导航、切图途中 mapCurrent 会短暂变化，找不到 route 不算）
+      if (prep.on && sel && sel !== prep.route) resetPrep();
+      const o = route?.opts;
+      setStep('stRoute', mapOk ? 'cur' : 'todo',
+        prep.on ? (prep.fail ? `出发失败：${prep.fail.msg}` : `出发中 · ${STEP_NAME[prep.step]}…`)
+        : route && !editing ? `${route.name} · ${route.points.length} 站${o ? ` · ${o.loop ? (o.loops ? `循环 ${o.loops} 圈` : '一直循环') : '单程'} · ${(+o.vmax).toFixed(2)} m/s` : ''}`
+        : editing ? '正在编辑路线' : store.routes.some(r => r.map === store.mapCurrent) ? '选择一个任务' : '这张地图还没有任务，点「新建」');
+      prepRender();
     }
     if (t === 'reloc'){
       $('#relocMeta').textContent = run('navigation') ? '导航栈保持运行' : up('localization') ? '只开了定位（没有 Nav2）' : '';
       $('#relocNote').innerHTML = run('navigation') ? '<b>导航栈保持运行</b> · 底盘已上锁。在当前估计的基础上修正，改完直接回到导航。'
-        : run('localization') ? '<b>只开了定位</b>（map_server + AMCL）。修正完点「返回导航」，出发前自检时启动导航。'
+        : run('localization') ? '<b>只开了定位</b>（map_server + AMCL）。修正完点「返回导航」，点「出发」时启动导航。'
         : '定位正在启动…';
       $('#relocBack').textContent = '完成，返回导航';
     }

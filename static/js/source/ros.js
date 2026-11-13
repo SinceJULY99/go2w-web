@@ -248,8 +248,8 @@ export function createRosSource(store, bus){
     // 任务卡片的步骤（真机上从 Nav2 行为树日志看得到的阶段）
     steps: [['plan', '规划路径', 'Theta*'], ['follow', '跟随路径', 'RotationShim · MPPI'], ['recover', '恢复行为', '需要时'], ['arrive', '到达', 'goal checker']],
     inspect: () => null,
-    // 摄像头：on = 要看 / 不看了；take = 别人正在看时接管
-    camera: { set(on, take = false){ camWanted = on; if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'cam', on, take })); } },
+    // 摄像头：on = 要看 / 不看了（后端最多 3 人同时看）
+    camera: { set(on){ camWanted = on; if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'cam', on })); } },
     // topic 查看器：订阅一个 topic 的消息内容（后端最多 2 Hz），返回取消函数
     watch(topic, cb){
       if (!watchers.has(topic)){ watchers.set(topic, new Set()); if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: 'inspect', topic, on: true })); }

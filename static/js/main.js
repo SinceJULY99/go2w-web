@@ -8,6 +8,8 @@ import { createActions } from './actions.js';
 import { createMapView } from './map_view.js';
 import { createPanels } from './panels.js';
 import { setupCamera } from './camera.js';
+import { setupRunState } from './status.js';
+import { setupAlerts } from './alerts.js';
 import { setupFlow } from './flow.js';
 import { setupReloc } from './reloc.js';
 import { toast } from './ui.js';
@@ -29,6 +31,8 @@ flow = setupFlow(store, src, actions, setTool, reloc);
 const replay = early.splice(0); bus.h.log.shift(); replay.forEach(a => bus.emit('log', ...a));
 bus.on('map', () => mapView.fit());
 setupCamera(src, bus);
+const alerts = setupAlerts(store, bus);                     // 服务异常：横幅 + 提示 + 日志
+const runState = setupRunState(store, actions, mapView);   // 地图右上角的运行状态牌
 // 调试用：地址加 ?debug 时可以在浏览器控制台里用 go2w.store / go2w.actions
 if (new URLSearchParams(location.search).has('debug')) window.go2w = { store, src, actions, mapView };
 
@@ -101,14 +105,14 @@ window.addEventListener('blur', () => { if (Object.values(keys).some(Boolean)){ 
 
 /* ---------- 主循环 ---------- */
 setTool('pan');
-panels.fast(); panels.medium(); panels.slow(); flow.render();
+panels.fast(); panels.medium(); panels.slow(); alerts(); flow.render(); runState();
 let last = performance.now(), a10 = 0, a5 = 0, a4 = 0, a1 = 0;
 function frame(t){
   const dt = Math.min(.05, (t - last)/1000); last = t;
   src.tick(dt);
   a10 += dt; a5 += dt; a4 += dt; a1 += dt;
   if (a10 >= .1){ a10 = 0; panels.pushHist(); }
-  if (a5 >= .2){ a5 = 0; panels.fast(); flow.render(); }
+  if (a5 >= .2){ a5 = 0; panels.fast(); alerts(); flow.render(); runState(); }
   if (a4 >= .25){ a4 = 0; panels.medium(); }
   if (a1 >= 1){ a1 = 0; panels.slow(); }
   mapView.draw(dt);

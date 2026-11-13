@@ -3,7 +3,8 @@
 11-06 在扩展坞 eth0 上实测：主控 192.168.123.161 → 230.1.1.1:1720，H.264 High@4.0、1280×720、约 14 帧/秒、
 约 1.45 Mbit/s，约每 2 s 一个关键帧（前面带 SPS/PPS）。
 扩展坞不解码：只把 RTP 拼回完整的一帧（Annex-B），经 /ws 发出去，浏览器用 MSE 播放。
-同一时间只发给一个网页（Wi-Fi 带宽有限），没人看时退出组播，不收任何数据。
+最多同时发给 MAX_VIEWERS 个网页（每多一个人，扩展坞 Wi-Fi 多发一路约 1.5 Mbit/s），每个网页单独排队、单独丢帧；
+没人看时退出组播，不收任何数据。
 本地调试：GO2W_CAM_ADDR=127.0.0.1:17200（单播），由 web/dev/fake_camera.py 回放录下的样本。
 """
 import asyncio
@@ -16,6 +17,7 @@ import time
 ADDR = os.environ.get('GO2W_CAM_ADDR', '230.1.1.1:1720')
 IFACE = os.environ.get('GO2W_CAM_IF') or os.environ.get('GO2W_WIRED_IF', 'eth0')
 NO_SIGNAL = 3.0      # 秒：这么久没收到包就提示「没有画面」
+MAX_VIEWERS = int(os.environ.get('GO2W_CAM_MAX', '3'))
 QUEUE_MAX = 30       # 约 2 s 的帧；网络跟不上时丢到下一个关键帧，不让延迟越积越大
 START = b'\x00\x00\x00\x01'
 
@@ -89,19 +91,58 @@ class _Proto(asyncio.DatagramProtocol):
         self.cam.on_packet(data)
 
 
+class Viewer:
+    """一个正在看画面的网页：自己的发送队列，网速跟不上时只丢它自己的帧。"""
+
+    def __init__(self, ws, who):
+        self.ws, self.who = ws, who
+        self.queue = asyncio.Queue(QUEUE_MAX)
+        self.need_key = True          # 刚加入 / 刚丢过帧：等下一个关键帧
+        self.dropped = 0
+        self.sender = None
+
+    def start(self):
+        self.sender = asyncio.create_task(self._send_loop())
+
+    async def stop(self):
+        if self.sender is not None:
+            self.sender.cancel()
+            await asyncio.gather(self.sender, return_exceptions=True)
+            self.sender = None
+
+    async def _send_loop(self):
+        while True:
+            blob = await self.queue.get()
+            try:
+                await self.ws.send_bytes(blob)
+            except Exception:
+                return
+
+    def offer(self, key, blob):
+        """收到一帧：返回是否放进了队列。"""
+        if self.need_key and not key:
+            return False
+        if self.queue.full():
+            # 网络跟不上：清空，等下一个关键帧，画面跳一下但延迟不会越积越多
+            while not self.queue.empty():
+                self.queue.get_nowait()
+            self.dropped += 1
+            self.need_key = True
+            return False
+        self.need_key = False
+        self.queue.put_nowait(blob)
+        return True
+
+
 class Camera:
     def __init__(self, pack, kind, log):
         self.pack, self.kind, self.log = pack, kind, log
-        self.viewer = None            # 正在看的网页（ws）
-        self.who = None               # 它的地址，给别人提示「正在被谁查看」
+        self.viewers = {}             # ws → Viewer，最多 MAX_VIEWERS 个
         self.transport = None
-        self.queue = None
-        self.sender = None
         self.depay = Depay()
-        self.need_key = True
         self.last_ts = None
         self.last_rx = 0.0
-        self.n_bytes = self.n_frames = self.dropped = 0
+        self.n_bytes = self.n_frames = 0
         self.size = None              # 从 SPS 解析出的分辨率
 
     # ---------- 组播 ----------
@@ -124,7 +165,7 @@ class Camera:
         if self.transport is None:
             sock = self._socket()
             self.transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(lambda: _Proto(self), sock=sock)
-            self.depay, self.last_rx = Depay(), 0.0
+            self.depay, self.last_rx, self.last_ts = Depay(), 0.0, None
             multicast = socket.inet_aton(ADDR.rsplit(':', 1)[0])[0] & 0xF0 == 0xE0
             self.log('INFO', f"摄像头：开始接收 {ADDR}{f'（{IFACE}）' if multicast else ''}")
 
@@ -135,40 +176,42 @@ class Camera:
             self.log('INFO', '摄像头：停止接收')
 
     # ---------- 观看者 ----------
-    async def request(self, ws, who, on, take=False):
+    async def request(self, ws, who, on):
         """网页要看 / 不看了。返回给这个网页的状态消息。"""
         if not on:
-            if ws is self.viewer:
-                await self.release()
+            await self.release(ws)
             return {'state': 'off'}
-        if self.viewer is not None and self.viewer is not ws and not self.viewer.closed and not take:
-            return {'state': 'busy', 'by': self.who}
-        old = self.viewer
-        if old is not None and old is not ws and not old.closed:
-            await self._send_json(old, {'t': 'cam', 'state': 'taken', 'by': who})
-        await self._stop_sender()
-        self.viewer, self.who = ws, who
-        self.queue, self.need_key, self.last_ts, self.dropped = asyncio.Queue(QUEUE_MAX), True, None, 0
-        self.sender = asyncio.create_task(self._send_loop(ws, self.queue))
+        for w in [w for w in self.viewers if w.closed and w is not ws]:
+            await self.release(w)
+        v = self.viewers.get(ws)
+        if v is not None:
+            # 已经在看（比如浏览器播放器重建了）：清空，从下一个关键帧重新开始
+            while not v.queue.empty():
+                v.queue.get_nowait()
+            v.need_key = True
+            return {'state': 'starting', 'viewers': len(self.viewers), 'max': MAX_VIEWERS}
+        if len(self.viewers) >= MAX_VIEWERS:
+            return {'state': 'full', 'max': MAX_VIEWERS, 'who': [x.who for x in self.viewers.values()]}
+        v = self.viewers[ws] = Viewer(ws, who)
+        v.start()
         try:
             await self._open()
         except OSError as e:
-            await self.release()
+            await self.release(ws)
             return {'state': 'error', 'msg': f'无法接收摄像头组播：{e}'}
-        return {'state': 'starting'}
+        self.log('INFO', f'摄像头：{who} 开始观看（{len(self.viewers)} / {MAX_VIEWERS}）')
+        return {'state': 'starting', 'viewers': len(self.viewers), 'max': MAX_VIEWERS}
 
     async def release(self, ws=None):
-        if ws is not None and ws is not self.viewer:
-            return
-        self.viewer = self.who = None
-        await self._stop_sender()
-        self._close()
-
-    async def _stop_sender(self):
-        if self.sender is not None:
-            self.sender.cancel()
-            await asyncio.gather(self.sender, return_exceptions=True)
-            self.sender = None
+        """ws 不看了；不给 ws 就全部停掉。最后一个人走了就退出组播。"""
+        for w in list(self.viewers) if ws is None else [ws]:
+            v = self.viewers.pop(w, None)
+            if v is not None:
+                await v.stop()
+                if ws is not None:
+                    self.log('INFO', f'摄像头：{v.who} 停止观看（{len(self.viewers)} / {MAX_VIEWERS}）')
+        if not self.viewers:
+            self._close()
 
     @staticmethod
     async def _send_json(ws, m):
@@ -177,22 +220,13 @@ class Camera:
         except Exception:
             pass
 
-    async def _send_loop(self, ws, queue):
-        while True:
-            blob = await queue.get()
-            try:
-                await ws.send_bytes(blob)
-            except Exception:
-                return
-
     # ---------- 收包 ----------
     def on_packet(self, data):
         self.last_rx = time.monotonic()
         for au, key, ts, lost in self.depay.push(data):
             if lost:
-                self.need_key = True
-            if self.need_key and not key:
-                continue
+                for v in self.viewers.values():
+                    v.need_key = True
             if key and self.size is None:
                 self.size = sps_size(au)
             dur = None
@@ -200,35 +234,33 @@ class Camera:
                 ms = ((ts - self.last_ts) & 0xFFFFFFFF) / 90.0
                 dur = round(ms, 1) if 0 < ms < 1000 else None
             self.last_ts = ts
-            if self.queue is None:
+            if lost and not key:
                 continue
-            if self.queue.full():
-                # 网络跟不上：清空，等下一个关键帧，画面跳一下但延迟不会越积越多
-                while not self.queue.empty():
-                    self.queue.get_nowait()
-                self.dropped += 1
-                self.need_key = True
-                continue
-            self.need_key = False
             self.n_frames += 1
             self.n_bytes += len(au)
-            self.queue.put_nowait(self.pack(self.kind, {'key': key, 'dur': dur}, au))
+            blob = None
+            for v in self.viewers.values():
+                if v.need_key and not key:
+                    continue
+                if blob is None:
+                    blob = self.pack(self.kind, {'key': key, 'dur': dur}, au)   # 打包一次，几个人共用
+                v.offer(key, blob)
 
     async def monitor(self):
-        """每秒给观看者发一次状态：帧率、码率、有没有信号。"""
+        """每秒给每个观看者发一次状态：帧率、码率、有没有信号、几个人在看。"""
         while True:
             await asyncio.sleep(1.0)
-            ws = self.viewer
-            if ws is None:
+            for w in [w for w in self.viewers if w.closed]:
+                await self.release(w)
+            if not self.viewers:
                 self.n_bytes = self.n_frames = 0
-                continue
-            if ws.closed:
-                await self.release()
                 continue
             quiet = time.monotonic() - self.last_rx if self.last_rx else None
             state = 'nosignal' if quiet is None or quiet > NO_SIGNAL else 'on'
-            await self._send_json(ws, {'t': 'cam', 'state': state, 'fps': self.n_frames, 'kbps': round(self.n_bytes * 8 / 1000),
-                                       'size': self.size, 'dropped': self.dropped, 'by': self.who})
+            base = {'t': 'cam', 'state': state, 'fps': self.n_frames, 'kbps': round(self.n_bytes * 8 / 1000),
+                    'size': self.size, 'viewers': len(self.viewers), 'max': MAX_VIEWERS}
+            for v in list(self.viewers.values()):
+                await self._send_json(v.ws, {**base, 'dropped': v.dropped})
             self.n_bytes = self.n_frames = 0
 
 

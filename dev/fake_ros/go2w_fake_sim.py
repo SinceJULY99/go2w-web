@@ -19,6 +19,9 @@ import heapq
 import math
 import os
 import queue
+
+FAKE_CTRL_OFF = os.environ.get('GO2W_FAKE_CTRL_OFF', '/tmp/go2w_fake_ctrl_off')
+FAKE_SCAN_OFF = os.environ.get('GO2W_FAKE_SCAN_OFF', '/tmp/go2w_fake_scan_off')
 import time
 import uuid
 from types import SimpleNamespace as N
@@ -788,7 +791,8 @@ def run(node):
         sim.patrol_step(now)
         k += 1
         cm = sim.ctrl_msg(now, k % 2 == 0)   # /go2w_ctrl/state：10 Hz，变化时立刻补发；和导航档位无关（运控一直在跑）
-        if cm is not None:
+        # 测试网页的报错提醒：这两个文件存在时模拟运控停了 / 雷达没数据
+        if cm is not None and not os.path.exists(FAKE_CTRL_OFF):
             node.deliver('/go2w_ctrl/state', cm)
         alive, nav = sim.any_ready(), sim.ready('navigation')
         # /map 是 latched：定位 / 建图起来时补发一次
@@ -810,7 +814,8 @@ def run(node):
             s.range_min, s.range_max = 0.1, 15.0
             ranges = sim.scan()
             s.ranges = ranges.tolist()
-            node.deliver('/scan', s)
+            if not os.path.exists(FAKE_SCAN_OFF):
+                node.deliver('/scan', s)
             node.deliver('/cloud_registered_body', sim.cloud_msg(ranges))
             sim.feedback(now)
             g, t = sim.goal, sim.teleop

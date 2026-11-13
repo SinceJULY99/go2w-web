@@ -237,10 +237,12 @@ body.has-photo .robot-ico{width:104px;height:78px;background:var(--panel)}
 .db{flex:1;min-height:0;position:relative}
 .dpane{position:absolute;inset:0;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
 .logs{font-family:var(--f-mono);font-size:11.5px;padding:6px 10px;line-height:1.65}
-.lrow{display:grid;grid-template-columns:92px 46px 150px 1fr;gap:10px;white-space:nowrap}
-.lrow .lt{color:var(--muted)}
-.lrow .ln{color:var(--fg-2);overflow:hidden;text-overflow:ellipsis}
-.lrow .lm{overflow:hidden;text-overflow:ellipsis}
+.lrow{display:grid;grid-template-columns:92px 46px 150px 1fr;gap:10px;align-items:start}
+.lrow .lt{color:var(--muted);white-space:nowrap}
+.lrow .ln{color:var(--fg-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 11-13：消息完整显示，长的自动换行，多行消息（例如进程日志尾部）保留换行；节点名太长仍截断，鼠标悬停看全名 */
+.lrow .lm{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
+.lrow .lv{align-self:start;margin-top:2px}
 .lv{font-size:10px;font-weight:500;text-align:center;border-radius:3px;align-self:center;line-height:16px}
 .lv.INFO{color:var(--fg-2);background:var(--raise)}
 .lv.WARN{color:#1d1300;background:var(--warn)}
@@ -505,3 +507,46 @@ input[type=range]{width:100%;accent-color:var(--accent);height:4px}
 #mapFlow .alignment-controls{padding:0;border-bottom:0;margin:0}
 #mapFlow .alignment-controls .meta{font:11px/1.6 var(--f-body);color:var(--muted)}
 #mapFlow .step[data-s="done"] .step-b{display:none}
+/* 地图右上角的运行状态牌（status.js）：工具列左边。data-s = crit / run / warn / ok / acc / idle / off */
+.run-state{top:14px;right:66px;display:grid;grid-template-columns:10px auto;column-gap:9px;align-items:center;padding:7px 13px 7px 11px;max-width:min(320px,calc(100% - 340px));
+  border-radius:20px;font-size:12px;--c:var(--muted)}
+.run-state i{width:9px;height:9px;border-radius:50%;background:var(--c);box-shadow:0 0 8px var(--c);grid-row:1/3}
+.run-state b{font:700 13px var(--f-display);letter-spacing:.04em;color:var(--c);white-space:nowrap}
+.run-state small{font:10.5px var(--f-mono);color:var(--fg-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.run-state[data-s="crit"]{--c:var(--crit);border-color:rgba(255,75,92,.55);background:rgba(40,8,14,.85)}
+.run-state[data-s="run"]{--c:var(--warn);border-color:rgba(243,177,63,.5)}
+.run-state[data-s="warn"]{--c:#ff8f3f;border-color:rgba(255,143,63,.5)}
+.run-state[data-s="ok"]{--c:var(--ok);border-color:rgba(53,212,138,.5)}
+.run-state[data-s="acc"]{--c:var(--accent);border-color:var(--accent-line)}
+.run-state[data-s="idle"]{--c:#7fc7c4}
+.run-state[data-s="off"]{--c:var(--muted)}
+.run-state.pulse i{animation:runPulse 1s ease-in-out infinite}
+@keyframes runPulse{50%{opacity:.25;box-shadow:none}}
+/* 导航任务里的运行参数（跟任务一起保存）和出发区 */
+.route-opts{margin:10px 0 8px;padding:9px 10px 4px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.015)}
+.route-opts-h{display:flex;align-items:baseline;gap:8px;font-size:11.5px;font-weight:700;color:var(--fg-2);margin-bottom:6px}
+.route-opts-h span{font-weight:400;font-size:10.5px;color:var(--muted)}
+.route-opts-h #routeOptsDirty{color:var(--warn);font-family:var(--f-mono)}
+.route-go{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
+.route-go .prep-list{margin-top:10px}
+.route-go .btn-row{margin-bottom:6px}
+.task-speed{margin-top:10px;padding-top:8px;border-top:1px dashed var(--line)}
+.task-speed .sl{grid-template-columns:56px 1fr 60px}
+/* 服务异常横幅（alerts.js）：地图上方居中，最严重的一条；提示框在它下面 */
+.alert-bar{position:absolute;z-index:5;top:14px;left:50%;transform:translateX(-50%);width:min(560px,calc(100% - 560px));min-width:300px;
+  display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 12px;border-radius:10px;
+  background:rgba(48,8,16,.94);border:1px solid rgba(255,75,92,.7);box-shadow:0 0 0 1px rgba(255,75,92,.15),0 8px 30px rgba(255,75,92,.25);backdrop-filter:blur(8px)}
+.alert-bar[data-s="warn"]{background:rgba(44,30,6,.94);border-color:rgba(243,177,63,.7);box-shadow:0 8px 30px rgba(243,177,63,.18)}
+.alert-bar>i{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-weight:800;color:#fff;background:var(--crit);animation:blink 1.2s steps(2) infinite}
+.alert-bar[data-s="warn"]>i{background:var(--warn);color:#2a1a00;animation:none}
+.alert-body{display:flex;flex-direction:column;gap:3px;min-width:0}
+.alert-body b{font-size:14px;color:#ffd5da}
+.alert-bar[data-s="warn"] .alert-body b{color:#ffe2a8}
+.alert-body span{font-size:12px;color:var(--fg)}
+.alert-body small{font:11.5px var(--f-mono);color:var(--fg-2);overflow-wrap:anywhere}
+.alert-body ul{list-style:none;margin:6px 0 0;padding:6px 0 0;border-top:1px dashed rgba(255,255,255,.15);display:grid;gap:5px}
+.alert-body li{font-size:11.5px;color:var(--fg-2)}
+.alert-body li b{font-size:12px;margin-right:6px;color:var(--crit)}
+.alert-body li[data-s="warn"] b{color:var(--warn)}
+.has-alert .toast{top:calc(14px + var(--alert-h,80px))}
+.pose-txt b.crit{color:var(--crit);font-weight:700}

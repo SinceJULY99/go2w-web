@@ -14,18 +14,26 @@ export function createActions(store, src){
   // 机器狗在策略（Velocity）里、能走；没接运控（ctrl.on = false）时不管
   const walking = () => !store.ctrl?.on || (store.ctrl.state === 'Velocity' && store.ctrl.ready);
   const canTeleop = () => store.link.ok && !store.estop && ((run('navigation') && store.odomOk) || run('bridge'));
-  function routeStartBlocker(route){
+  // 点「出发」前就能判断的问题（站立、导航、定位由出发流程自动处理，不在这里拦）
+  function routeGoBlocker(route){
     if (!route) return '请先保存或选择一个任务。';
     if (!store.link.ok) return '等待连接后端。';
     if (store.task.status === 'active' || store.profiles.patrol !== 'stop') return '请先结束当前导航或巡逻。';
     if (store.estop) return '请先解除急停。';
     if (store.busy) return '等待运行档位切换完成。';
+    if (store.profiles.mapping !== 'stop') return '正在建图：先停止建图。';
+    const bad = store.alerts?.find(x => x.go);                 // 运控离线、节点掉了……：点了也走不到底，先拦住
+    if (bad) return `${bad.title}：${bad.fix}`;
     if (route.map !== store.mapCurrent) return `请先切换到路线地图 ${route.map}。`;
-    if (!run('navigation')) return '先完成第 3 步「出发前自检」（会自动启动导航）。';
+    return '';
+  }
+  // 真正下发任务时的检查：出发流程走到最后一步才调 startRoute，这时导航、定位、站立都应该好了
+  function routeStartBlocker(route){
+    const r = routeGoBlocker(route); if (r) return r;
+    if (!run('navigation')) return '导航没有运行。';
     if (!store.odomOk || !store.robot.valid || store.fixed !== 'map') return '等待地图定位和里程计就绪。';
-    if (!store.initPose) return '先完成第 3 步「出发前自检」（定位还没完成）。';
-    if (!walking()) return '机器狗没有站起来：重新做第 3 步「出发前自检」。';
-    if (store.prepOk && !store.prepOk(route)) return '先完成第 3 步「出发前自检」。';
+    if (!store.initPose) return '还没有定位。';
+    if (!walking()) return '机器狗没有站起来。';
     return '';
   }
   const blocked = cost => cost != null && cost >= 253;
@@ -39,7 +47,7 @@ export function createActions(store, src){
   });
 
   const A = {
-    canMove, canTeleop, curMode, routeStartBlocker, walking,
+    canMove, canTeleop, curMode, routeStartBlocker, routeGoBlocker, walking,
     // 站起：趴着 → 站稳 → 策略接管（后端一步步等运控的状态）
     standUp(){
       if (!ready('standUp')) return Promise.resolve({ ok: false });
@@ -87,11 +95,12 @@ export function createActions(store, src){
       if (src.name !== 'ros') return Promise.resolve({ ok:false, msg:'纯前端模拟，尚未用 Nav2 检查路径' });
       return src.cmd.checkRoute({ map:draft.map, points:draft.points });
     },
-    saveRoute(name){
+    // opts：运行参数 { loop, loops, vmax, wmax }，跟任务一起保存（11-12 起）
+    saveRoute(name, opts){
       const { id, map, points, confirmed } = store.routeDraft;
       if (!confirmed) return toast('请先确认路线', 'err');
       if (!name.trim() || points.length < 2 || map !== store.mapCurrent) return toast('请在当前地图添加至少两个点，并填写任务名', 'err');
-      return exec(src.cmd.saveRoute({ route_id: id, name, map, points }), '任务已保存');
+      return exec(src.cmd.saveRoute({ route_id: id, name, map, points, opts }), '任务已保存');
     },
     deleteRoute(route, onDeleted){
       confirmBox({ title:'删除任务', body:`确定删除「${route.name}」？`, ok:'删除', danger:true,
@@ -100,8 +109,8 @@ export function createActions(store, src){
           if (reply?.ok) onDeleted();
         } });
     },
-    // 「出发」：第 3 步自检已经把地图、定位、路线都核对过，点一下就自动解锁出发（后端 route_start 带 arm）。
-    // opts.vmax / wmax：第 4 步选的速度上限，后端出发前设给 cmd_bridge。
+    // 下发任务：出发流程（flow.js）站好、导航和定位都就绪后调用，自动解锁出发（后端 route_start 带 arm）。
+    // opts.vmax / wmax：任务里保存的速度上限，后端出发前设给 cmd_bridge。
     // 只有激光和地图对不太上（匹配率 < 60%）时才多问一句
     startRoute(route, opts = {}){
       const reason = routeStartBlocker(route);
@@ -111,7 +120,7 @@ export function createActions(store, src){
       if (m == null || m >= 60) return go();
       return new Promise(resolve => formBox({ title: '定位可能不准', ok: '仍然出发', danger: true,
         rows: [['当前位置', `(${R.x.toFixed(2)}, ${R.y.toFixed(2)}) ${Math.round(deg(R.th)) || 0}°`], ['匹配率', `${m.toFixed(0)}%`]],
-        warn: `激光和地图的匹配率只有 ${m.toFixed(0)}%，建议先在第 3 步重新定位。`,
+        warn: `激光和地图的匹配率只有 ${m.toFixed(0)}%，建议先重新定位。`,
         onCancel: () => resolve(null), onOk: () => resolve(go()) }));
     },
     cancel(){ if (ready('cancel')) exec(src.cmd.cancel(), '任务已取消'); },
