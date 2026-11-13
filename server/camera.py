@@ -5,7 +5,7 @@
 扩展坞不解码：只把 RTP 拼回完整的一帧（Annex-B），经 /ws 发出去，浏览器用 MSE 播放。
 最多同时发给 MAX_VIEWERS 个网页（每多一个人，扩展坞 Wi-Fi 多发一路约 1.5 Mbit/s），每个网页单独排队、单独丢帧；
 没人看时退出组播，不收任何数据。
-本地调试：GO2W_CAM_ADDR=127.0.0.1:17200（单播），由 web/dev/fake_camera.py 回放录下的样本。
+离线测试：GO2W_CAM_ADDR=127.0.0.1:17200 可从本地单播 RTP 源接收。
 """
 import asyncio
 import json
