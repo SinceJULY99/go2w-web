@@ -1,6 +1,6 @@
-"""运控（go2w_deploy 的 go2w_ctrl）的状态和站起 / 趴下请求，域 0（Go2W 内网）。
+"""统一运行容器中 go2w_ctrl 的状态和站起 / 趴下请求，域 0（Go2W 内网）。
 
-go2w_ctrl 的接口（同事的仓库，部署在扩展坞 ~/go2w_deploy，见那边的 include/ctrl_state.h、sport_move_bridge.h）：
+go2w_ctrl 的接口（运行容器中唯一的 control 进程组）：
   - 状态 topic rt/go2w_ctrl/state（ROS2 里 /go2w_ctrl/state，std_msgs/String），10 Hz，变化时立刻补发：
       {"state":"Passive|FixStand|Velocity","ready":true,"seq":3}
       ready：Passive 进入即 true；FixStand 插值（2 s）走完才 true；Velocity 过了 blend_t 才 true
@@ -33,26 +33,43 @@ class CtrlLink:
         self.snap = (None, False, -1, 0.0)    # (state, ready, seq, 收到时间 monotonic)；整体替换，跨线程读不用锁
         self.steady_t = None                  # 进入当前 (state, ready=true) 的时间；没 ready 时 None
         self.n = 0
+        self.executor = self.thread = None
         if fake:
             self.ctx, self.ros = None, main_node
         else:
             import rclpy
             from rclpy.context import Context
-            from rclpy.executors import SingleThreadedExecutor
+            from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
             from rclpy.node import Node
             from rclpy.signals import SignalHandlerOptions
             self.ctx = Context()
             rclpy.init(context=self.ctx, domain_id=0, signal_handler_options=SignalHandlerOptions.NO)
             # 不接受命令行的 __node 重命名，否则会和域 43 的主节点同名
             self.ros = Node('go2w_web_robot', context=self.ctx, use_global_arguments=False)
-            ex = SingleThreadedExecutor(context=self.ctx)
-            ex.add_node(self.ros)
-            threading.Thread(target=ex.spin, daemon=True).start()
+            self.executor = SingleThreadedExecutor(context=self.ctx)
+            self.executor.add_node(self.ros)
+
+            def spin():
+                try:
+                    self.executor.spin()
+                except ExternalShutdownException:
+                    pass
+            self.thread = threading.Thread(target=spin, daemon=True)
+            self.thread.start()
         from rclpy.qos import QoSProfile, ReliabilityPolicy
         # BEST_EFFORT 订阅能和可靠 / 不可靠的发布者都匹配上
         self.ros.create_subscription(String, '/go2w_ctrl/state', self.on_state,
                                      QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.pub = self.ros.create_publisher(Request, '/api/sport/request', 10)
+
+    def close(self):
+        """只释放网页自己的域 0 监听器；不发 Sport 请求，不停止控制进程。"""
+        if self.ctx is None:
+            return
+        self.executor.shutdown()
+        self.thread.join(timeout=3.0)
+        self.ros.destroy_node()
+        self.ctx.try_shutdown()
 
     def on_state(self, m):
         try:

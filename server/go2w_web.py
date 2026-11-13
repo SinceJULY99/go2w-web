@@ -4,7 +4,7 @@
 一个进程里跑两件事：
   - rclpy 节点 go2w_web（域 43）：订阅地图 / scan / 里程计 / 健康状态 / 导航状态，查 TF，
     并代网页发初始位姿、导航目标、取消、解锁 / 上锁、调参
-  - aiohttp：同一端口提供静态页面（web/static）和 WebSocket（/ws）
+  - aiohttp：同一端口提供安装的静态页面和 WebSocket（/ws）
 
 安全规则（P1）
   - 急停：取消所有导航目标 + 调 /go2w_cmd_bridge/arm(false)（cmd_bridge 立即发 StopMove 并上锁）。
@@ -23,8 +23,7 @@ WebSocket 协议
     1 = 地图：负载是 zlib 压缩的 uint8 栅格（0..100 占用概率，255 未知），行 0 在 origin 一侧
     2 = scan：负载是 float32 [x, y, x, y, ...]，已经变换到 fixed 坐标系
 
-运行（容器里）：python3 /go2w/web/server/go2w_web.py --port 8080
-本地调试（Mac，假 ROS）：web/dev/run.sh
+运行（统一运行容器里）：python3 /opt/go2w/console/server/go2w_web.py --port 8080
 """
 import argparse
 import asyncio
@@ -54,6 +53,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rcl_interfaces.msg import Log, Parameter, ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan, PointCloud2
@@ -77,8 +77,8 @@ CLOUD_Z, CLOUD_RANGE, CLOUD_VOXEL, CLOUD_MAX, CLOUD_DT = (0.30, 1.60), 12.0, 0.0
 PARTICLES_MAX, PARTICLES_DT = 300, 0.5
 PLAN_MAX = 500
 ROSOUT_PER_S = 30   # /rosout 转发限流（条 / 秒）
-# 仓库的 data/（容器里是 /go2w/data）；本地调试时 run.sh 指向一份副本，免得写坏真实数据
-DATA = os.environ.get('GO2W_DATA') or os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data'))
+# 已挂载的持久数据；离线测试可以显式指定临时目录。
+DATA = os.environ.get('GO2W_DATA') or '/go2w/data'
 # 录包上传到常驻服务器 166:~/go2w_bags。密钥在 data/ssh（不随 sync.sh 同步）；166 上这把钥匙被 rrsync 限制成只能往 go2w_bags 写
 UPLOAD_DEST = os.environ.get('GO2W_UPLOAD_DEST', 'evoengine@192.168.1.166:')
 UPLOAD_LABEL = os.environ.get('GO2W_UPLOAD_LABEL', '166:~/go2w_bags')
@@ -661,7 +661,7 @@ class Bridge(Node):
 
     def load_map(self, name):
         req = LoadMap.Request()
-        req.map_url = f'/go2w/data/maps/{name}.yaml'
+        req.map_url = os.path.join(DATA, 'maps', f'{name}.yaml')
         return self.loadmap_cli.call_async(req)
 
     def fetch_map_current(self):
@@ -966,7 +966,7 @@ class Bridge(Node):
 
     def profiles(self, names, procs_status=None, transitions=None):
         """档位状态：进程在 + 关键节点在 = 运行中；进程在、节点还没起来 = 启动中；
-        拿不到进程状态时（本地没有 docker.sock）只看节点。"""
+        拿不到本地 supervisor 状态时只看节点。"""
         profiles = {}
         for m in P.MODES:
             nodes_up = all(n in names for n in MODE_NODES[m])
@@ -975,7 +975,7 @@ class Bridge(Node):
             else:
                 st = procs_status.get(m, False)
             profiles[m] = ('run' if nodes_up or procs_status is None else 'starting') if st else 'stop'
-        # 网页不再启动巡逻；命令行（nav.sh）启动的 patrol.py 仍要识别：取消 / 急停 / 切档位时连它一起停
+        # supervisor 启动的巡逻也要识别：取消 / 急停 / 切档位时连它一起停
         profiles['patrol'] = 'run' if 'go2w_patrol' in names or (procs_status or {}).get('patrol') else 'stop'
         profiles['bag'] = 'run' if any(n.startswith('rosbag2_recorder') for n in names) or (procs_status or {}).get('bag') else 'stop'
         # 遥控用的独立速度桥（不开导航时）：进程在 + 节点在才算能用
@@ -1001,8 +1001,8 @@ class Server:
             from go2w_fake_procs import FakeProcs
             self.procs = FakeProcs(node)
         else:
-            self.procs = P.DockerProcs()
-        self.procs_status = None      # 最近一次进程检查结果；None = 查不到（没有 docker.sock）
+            self.procs = P.RuntimeProcs()
+        self.procs_status = None      # 最近一次 supervisor 检查结果；None = 暂不可用
         self.transitions = {}         # 网页发起、还没完成的启停：档位 → 'starting' / 'stopping'
         self.starting = {}            # 档位 → 开始启动的时间（启动超时 / 失败检测）
         self.bridge_t, self.bridge_started = -1e9, False   # 遥控用独立速度桥：上次启动时间、是否由网页启动过
@@ -1322,10 +1322,10 @@ class Server:
     def ctrl_blocker(self):
         """导航能不能让机器狗动：要在策略（Velocity）里。没接运控（GO2W_CTRL=0）时不拦。"""
         if self.ctrl is None:
-            return None
+            return '无法连接运控状态，请检查运行容器的 control 组和域 0 通信' if CTRL_ON else None
         s, ready, _ = self.ctrl_get()
         if s is None:
-            return '收不到运控状态（/go2w_ctrl/state）：go2w-ctrl.service 没在运行？'
+            return '收不到运控状态（/go2w_ctrl/state），请检查运行容器的 control 组和域 0 通信'
         if s != 'Velocity' or not ready:
             return f'机器狗没有站起来（运控状态 {s}）'
         return None
@@ -1365,14 +1365,14 @@ class Server:
 
     async def stand_up(self, who):
         if self.ctrl is None:
-            return False, '运控接入已关闭（GO2W_CTRL=0）'
+            return False, self.ctrl_blocker() or '运控接入已关闭（GO2W_CTRL=0）'
         if self.ctrl_op:
             return False, '正在站起 / 趴下，请稍等'
         if self.estop:
             return False, '急停中：先解除急停'
         s, ready, _ = self.ctrl_get()
         if s is None:
-            return False, '收不到运控状态（/go2w_ctrl/state）：go2w-ctrl.service 没在运行？'
+            return False, '收不到运控状态（/go2w_ctrl/state），请检查运行容器的 control 组和域 0 通信'
         self.auto_lie, self.stand_hold, self.idle_since = True, False, None   # 网页站起来的：空闲了自动趴下
         if s == 'Velocity' and ready:
             return True, '已经站好（策略运行中）'
@@ -1405,10 +1405,10 @@ class Server:
     async def lie_down(self, who, auto=False):
         """原地趴下。手动的先取消任务、上锁，等停稳；自动的只在空闲时触发（idle_tick）。"""
         if self.ctrl is None:
-            return False, '运控接入已关闭（GO2W_CTRL=0）'
+            return False, self.ctrl_blocker() or '运控接入已关闭（GO2W_CTRL=0）'
         s, _, _ = self.ctrl_get()
         if s is None:
-            return False, '收不到运控状态（/go2w_ctrl/state）：go2w-ctrl.service 没在运行？'
+            return False, '收不到运控状态（/go2w_ctrl/state），请检查运行容器的 control 组和域 0 通信'
         if s == 'Passive':
             self.auto_lie = self.stand_hold = False
             return True, '已经趴着'
@@ -1475,19 +1475,19 @@ class Server:
             elif time.monotonic() - self.t_start > 10.0:
                 self.ctrl_online = False
                 self.node.event('ERROR', '运控离线：后端启动以来没有收到运控状态（/go2w_ctrl/state），'
-                                         '站起和出发都不可用。检查扩展坞上的 go2w-ctrl.service')
+                                         '站起和出发都不可用。检查运行容器的 control 组和域 0 通信')
             return
         if prev and not online:
             self.ctrl_online = False
             self.node.event('ERROR', f'运控离线：超过 {CTRL_STALE:.0f} s 没有收到运控状态（/go2w_ctrl/state），'
-                                     '站起和出发都不可用。检查扩展坞上的 go2w-ctrl.service')
+                                     '站起和出发都不可用。检查运行容器的 control 组和域 0 通信')
         elif not prev and online:
             self.ctrl_online = True
             self.node.event('INFO', '运控已恢复：重新收到运控状态')
 
     def ctrl_view(self):
         if self.ctrl is None:
-            return {'on': False}
+            return {'on': CTRL_ON, 'state': None, 'ready': False, 'age': None}
         s, ready, seq = self.ctrl_get()
         left = None if self.idle_since is None else max(0.0, IDLE_LIE - (time.monotonic() - self.idle_since))
         rx = self.ctrl.last_rx()
@@ -2135,7 +2135,7 @@ class Server:
                     self.transitions[m] = 'stopping'
                 if n.is_armed() or n.nav_active():
                     await self.disarm_and_cancel('切换运行档位')
-                ok = await self.procs.stop_modes()   # 会顺带杀掉遥控用的速度桥（同一个 pkill 模式）
+                ok = await self.procs.stop_modes()   # supervisor 正常停止导航组和巡逻，不影响控制组
                 self.bridge_t, self.bridge_started = -1e9, False   # 不算异常退出；停完马上可以重新拉起
                 await self.refresh_procs()
                 for m in cur:
@@ -2144,7 +2144,7 @@ class Server:
                 if ok:
                     n.event('INFO', f"已停止{'、'.join(self.MODE_NAME[m] for m in cur) or '巡逻'}")
                 else:
-                    n.event('ERROR', '还有导航进程没退出，没有继续启动新档位。可以再点一次，或在扩展坞上执行 nav.sh stop')
+                    n.event('ERROR', '导航组尚未退出，没有继续启动新档位。请检查 go2w navigation status 和日志')
                     return
             if mode == 'navigation' and (self.procs_status or {}).get('bridge'):
                 await self.stop_bridge('启动导航')
@@ -2159,7 +2159,7 @@ class Server:
                 await asyncio.sleep(0.3)
                 await self.refresh_procs()
                 n.event('INFO', f"启动{self.MODE_NAME[mode]}{'（地图 ' + map_name + '）' if map_name else ''}，"
-                                f'日志在 data/logs/{mode}.log')
+                                '日志在 data/logs/navigation.log')
                 if mode != 'mapping':
                     self.map_choice = None
         except Exception as e:
@@ -2314,8 +2314,8 @@ class Server:
         now = time.monotonic()
         if not nav and not st.get('bridge') and now - self.bridge_t > BRIDGE_RETRY:
             if self.bridge_started:
-                n.event('WARN', '遥控用的速度桥退出了，正在重新启动。data/logs/teleop_bridge.log 最后几行：\n'
-                        + P.tail(os.path.join(DATA, 'logs', 'teleop_bridge.log'), 6))
+                n.event('WARN', '遥控用的速度桥退出了，正在重新启动。data/logs/bridge.log 最后几行：\n'
+                        + P.tail(os.path.join(DATA, 'logs', 'bridge.log'), 6))
             self.bridge_t, self.bridge_started = now, True
             await self.procs.start_bridge()
         elif nav and st.get('bridge'):
@@ -2555,9 +2555,12 @@ class Server:
 
     # ---------- 导航没开时也能看地图 ----------
     def default_map(self):
-        """启动定位 / 导航、或导航没开时显示用的地图：网页选的 > 正在用的 > 上次用的 > lab_20261021 > 最新的。"""
+        """网页选择 > map_server 正在用的 > 当前部署地图 > 网页历史 > 最新地图。"""
         names = [m['name'] for m in self.maps]
-        for name in (self.map_choice, self.node.map_current, self.last_map, 'lab_20261021'):
+        deployed = os.path.basename(os.environ.get('GO2W_MAP', ''))
+        if deployed.endswith(('.yaml', '.yml')):
+            deployed = os.path.splitext(deployed)[0]
+        for name in (self.map_choice, self.node.map_current, deployed, self.last_map):
             if name in names:
                 return name
         return names[0] if names else None
@@ -2636,11 +2639,11 @@ class Server:
                         self.background(self.auto_localize_on_start(m))
                 elif self.procs_status is not None and not self.procs_status.get(m) and age > 4:
                     self.starting.pop(m); self.transitions.pop(m, None)
-                    n.event('ERROR', f'{self.MODE_NAME[m]}启动失败，进程退出了。data/logs/{m}.log 最后几行：\n'
-                            + P.tail(os.path.join(DATA, 'logs', f'{m}.log'), 8))
+                    n.event('ERROR', f'{self.MODE_NAME[m]}启动失败，进程退出了。data/logs/navigation.log 最后几行：\n'
+                            + P.tail(os.path.join(DATA, 'logs', 'navigation.log'), 8))
                 elif age > START_TIMEOUT:
                     self.starting.pop(m); self.transitions.pop(m, None)
-                    n.event('ERROR', f'{self.MODE_NAME[m]} {START_TIMEOUT:.0f} s 内没有起来，看 data/logs/{m}.log')
+                    n.event('ERROR', f'{self.MODE_NAME[m]} {START_TIMEOUT:.0f} s 内没有起来，看 data/logs/navigation.log')
             if k % 3 == 1:
                 self.maps = P.list_maps(os.path.join(DATA, 'maps'))
                 try:
@@ -2808,7 +2811,7 @@ class Server:
                 if k % 5 == 0:
                     self.idle_tick()
                     self.ctrl_watch()
-                # 急停期间底盘被别处解锁（nav.sh arm 等）→ 再次上锁。
+                # 急停期间底盘被其他客户端解锁 → 再次上锁。
                 # 只认急停 1 s 之后收到的「已解锁」，避免把上锁之前的旧状态当成又被解锁
                 if self.estop and n.is_armed() and n.armed_t > self.estop_t + 1.0 and k % 5 == 0:
                     await self.disarm_and_cancel('急停期间底盘被解锁')
@@ -2899,8 +2902,13 @@ class Server:
                 await self.disarm_and_cancel('网页服务关闭')
                 await asyncio.gather(self.route_job, return_exceptions=True)
             await self.camera.release()
-            for t in a['tasks']:
+            tasks = [*a['tasks'], *self.pending]
+            for t in tasks:
                 t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self.procs.close()
+            if self.ctrl is not None:
+                self.ctrl.close()
 
         app.on_startup.append(start)
         app.on_cleanup.append(stop)
@@ -2930,12 +2938,23 @@ def main():
 
     rclpy.init()
     node = Bridge()
-    threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+
+    def spin():
+        try:
+            executor.spin()
+        except ExternalShutdownException:
+            pass
+    ros_thread = threading.Thread(target=spin, daemon=True)
+    ros_thread.start()
     node.get_logger().info(f'go2w_web on http://0.0.0.0:{args.port}，心跳超时 {args.heartbeat:.1f} s')
     try:
         web.run_app(Server(node, os.path.abspath(args.static), args.heartbeat).app(), host='0.0.0.0', port=args.port,
                     print=None, handle_signals=True)
     finally:
+        executor.shutdown()
+        ros_thread.join(timeout=3.0)
         node.destroy_node()
         rclpy.try_shutdown()
 

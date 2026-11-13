@@ -173,7 +173,7 @@ export function setupFlow(store, src, actions, setTool, reloc){
     if (C?.on){
       if (!(C.state === 'Velocity' && C.ready)){
         if (prep.standOk) return prepFail('stand', C.state ? `机器狗不在行走状态（${C.state}）` : '收不到运控状态');
-        if (C.state == null) return prepFail('stand', '收不到运控状态：go2w-ctrl.service 没在运行？');
+        if (C.state == null) return prepFail('stand', '收不到运控状态：请检查运行容器的 control 组和域 0 通信');
         if (!prep.standT){
           prep.standT = now;
           const t0 = prep.t0;

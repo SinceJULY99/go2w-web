@@ -1,6 +1,6 @@
-"""本地调试用：代替 web/server/procs.py 的 DockerProcs，「进程」都在假模拟器里。
+"""本地调试用：代替 server/procs.py 的 RuntimeProcs，「进程」都在假模拟器里。
 
-由 go2w_web.py 在 GO2W_FAKE_PROCS=1 时加载（web/dev/run.sh 会设置）。
+由 go2w_web.py 在 GO2W_FAKE_PROCS=1 时加载（dev/run.sh 会设置）。
 """
 import asyncio
 import os
@@ -92,3 +92,6 @@ class FakeProcs:
                 sys.executable, str(script), str(data / 'maps'), source, target, str(angle),
                 stdout=log, stderr=log)
             return await process.wait() == 0
+
+    async def close(self):
+        pass

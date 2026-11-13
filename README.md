@@ -4,7 +4,7 @@
 
 ```
 server/go2w_web.py   后端：rclpy 节点（域 43）+ aiohttp，HTTP 和 WebSocket 同一端口
-server/procs.py      运行档位的进程管理（经 docker.sock 在 go2w_humble 容器里执行）
+server/procs.py      运行档位的进程管理（经运行容器 supervisor 的 socket 启停进程组）
 server/camera.py     前置摄像头 RTP 组播接收、拼帧
 static/              前端：原生 JS 模块，不需要构建
   js/source/mock.js  模拟数据源（示例地图 + 机器人仿真）
@@ -19,10 +19,10 @@ prototype/           最早的单文件原型和右栏原型，留作对照
 
 这个仓库是从 [go2w](https://github.com/SinceJULY99/go2w) 的 `web/` 目录拆出来的（11-10，保留了历史）。代码本身单独维护，但运行时仍依赖主仓库：
 
-- 扩展坞上它放在 `~/go2w/web`，容器里是 `/go2w/web`。`go2w_web` 容器的镜像和 compose 在主仓库 `docker/`。
-- 后端调用主仓库的脚本：`scripts/save_map.sh`、`scripts/rollback_recorder.py`、`scripts/calib/align_map.py`、`docker/ros_env.sh`，launch 文件在 `ws/src/go2w_bringup`。
-- 数据目录默认是上一级的 `data/`（`~/go2w/data`），可以用 `GO2W_DATA` 改。地图、路线、录包都在那里，不进这个仓库。
-- 同步到扩展坞和 166 仍用主仓库的 `scripts/sync.sh`，它同步的是主仓库里的 `web/`。在这里改完，要先把改动放进主仓库的 `web/` 再同步。
+- 11-12 起扩展坞跑的是统一运行容器 `go2w_runtime`（镜像 `go2w-runtime:<release>`，由 systemd 的 `go2w-runtime.service` 启动），不再有 `go2w_humble` / `go2w_web` 两个容器。网页打包在镜像里：后端 `/opt/go2w/console/server`，前端 `/opt/go2w/console/static`。
+- 导航、巡逻、录包、回溯、速度桥都是容器里 supervisor 管的进程组，后端经 `/run/go2w/supervisor.sock`（环境变量 `GO2W_SUPERVISOR_SOCKET`）请求启停；运控 control 组和 DDS 录制不归网页管。
+- 存图、对齐地图由后端直接起子进程，脚本在 `/opt/go2w/console/tools/`（`save_map.sh`、`align_map.py`）。
+- 数据目录是容器里的 `/go2w/data`（扩展坞上 `/opt/go2w/data`），可以用 `GO2W_DATA` 改。地图、路线、录包都在那里，不进这个仓库。导航日志在 `data/logs/navigation.log`，遥控速度桥在 `data/logs/bridge.log`。
 
 ## 进度
 
@@ -127,9 +127,9 @@ prototype/           最早的单文件原型和右栏原型，留作对照
 12. 日志面板能看到 controller_server、bt_navigator 等节点的日志
 13. 全部图层打开时看顶栏 CPU：如果比关掉时高出很多，告诉我，可以调低点云的点数或频率
 
-P3（`docker exec` 走的是真实 Docker API，本地只用假 socket 测过）：
+P3（supervisor 协议本地只用假 socket 测过）：
 
-14. 不动机器人：点「全部停止」，节点全部下线；在扩展坞上 `docker exec go2w_humble pgrep -af "ros2 launch"` 没有输出
+14. 不动机器人：点「全部停止」，节点全部下线；在扩展坞上 `sudo docker exec go2w_runtime pgrep -af "ros2 launch"` 没有输出
 15. 启动「导航」：显示启动中 → 运行中；故意选一张坏地图或改坏配置，确认日志面板显示失败原因
 16. 切到「建图」→ 存一张新地图 → `data/maps` 里出现 → 切回「导航」，用「切换」换图后重设初始位姿
 17. 录包 10 s：`data/bags` 里有这个包，`ros2 bag info` 能读
@@ -140,12 +140,12 @@ P3（`docker exec` 走的是真实 Docker API，本地只用假 socket 测过）
 
 ### P3 的注意事项
 
-- `go2w_web` 挂了 `docker.sock`，等于后端能控制扩展坞上的 docker。后端只执行 `server/procs.py` 里固定的命令，地图名、包名、topic 名都经过校验。
+- 后端只能请求 supervisor 启停固定的几个进程组，不再挂 `docker.sock`。地图名、包名、topic 名、时长、角度都在 `server/procs.py` 里校验，不合法的直接拒绝。
 - 网页没有登录：同一网络里能打开页面的人都能启停导航、解锁底盘。只在可信网络里用。
 - 多站任务和遥控都受心跳保护：关掉发起操作的网页会停车。长时间执行任务时要保持网页开着。
 - 遥控直接发布 `/cmd_vel`，开始前会取消导航并拒绝同时发目标；没有加速度指令复用器，RViz 此时再发目标会和遥控抢指令。
 
-测试：`node dev/test_protocol.mjs`（P1）、`node dev/test_p3.mjs`（P3）、`node dev/test_map_views.mjs`（地图显示方向）都要先运行 `dev/run.sh`；`dev/test_procs.py` 用假 Docker socket 真实执行进程管理脚本。
+测试：`node dev/test_protocol.mjs`（P1）、`node dev/test_p3.mjs`（P3）、`node dev/test_map_views.mjs`（地图显示方向）都要先运行 `dev/run.sh`；`dev/test_procs.py` 用假 supervisor socket 测进程管理的请求格式、状态换算和参数校验。
 
 每一项都手持遥控器做，先在空旷处、低速（滑条调到 0.3 m/s）试。
 
@@ -170,29 +170,15 @@ dev/run.sh
 
 网页「开始录包」是分段录制（主仓库的 `scripts/segment_recorder.py`，替代原来的 `ros2 bag record`）：一直录，每 30 秒存成一个独立的包，包名是这一段的开始时间 `go2w_<月日>_<时分秒>`（同一秒重名加 `_2`；11-12 前是 `web_`）。每一段开头都写入 `/map`、`/tf_static`、`/robot_description` 这种只发一次的 topic，任何一段单独拿出来都能回放；段与段之间不丢消息。正在写的那段在 `data/bags/.recording/`，写完才整体移进 `data/bags`，所以列表里的包都能直接上传、删除。停止录包时把当前这段写完再退出。上次异常退出没写完的段会被移成 `<名字>_unfinished`（缺 metadata.yaml，用 `ros2 bag reindex` 修复）。段长在 `procs.py` 的 `BAG_SEGMENT`；日志 `data/logs/bag_go2w_<时间>.log`。命令行 `nav.sh` 手动跑的 `ros2 bag record` 仍按一个包处理。
 
-录包区的「回溯录制」打开时（默认打开），建图 / 定位 / 导航运行期间，主仓库的 `scripts/rollback_recorder.py` 把最近 20 秒的数据留在内存里循环覆盖，不写硬盘；点「保存刚才 20 秒」存成 `data/bags/go2w_<时间>`（11-12 前是 `snap_`），和普通录包一样可以上传、删除。11-12 起录所有 topic（`procs.py` 的 `ROLLBACK_TOPICS`）。它是独立进程、独立节点，可以和 `ros2 bag record` 同时运行。`/map`、`/tf_static`、`/robot_description` 这种只发一次的 topic 会一直保留，放在包的开头。日志在 `data/logs/rollback.log`，开关状态在 `data/rollback.json`。
+录包区的「回溯录制」打开时（默认打开），建图 / 定位 / 导航运行期间，主仓库的 `scripts/rollback_recorder.py` 把最近 20 秒的数据留在内存里循环覆盖，不写硬盘；点「保存刚才 20 秒」存成 `data/bags/go2w_<时间>`（11-12 前是 `snap_`），和普通录包一样可以上传、删除。11-12 起录所有 topic（运行容器的入口脚本加 `--all`）。它是独立进程、独立节点，可以和 `ros2 bag record` 同时运行。`/map`、`/tf_static`、`/robot_description` 这种只发一次的 topic 会一直保留，放在包的开头。日志在 `data/logs/rollback.log`，开关状态在 `data/rollback.json`。
 
 卡住自动保存：回溯录制在跑时，如果导航目标还没结束（没到、没取消）、底盘已解锁、没急停，而 odom 位置 8 秒内移动不到 8 cm、朝向变化不到 0.15 rad（约 9°），就认为狗卡住了，网页日志报一条警告，再等 15 秒，把判定卡住那一刻的前 15 秒 + 后 15 秒（共 30 秒）存成 `data/bags/go2w_<时间>`（11-12 前是 `stuck_`；网页日志里会写明是卡住自动保存）。回溯进程因此缓存最近 30 秒；手动「保存刚才 20 秒」仍是 20 秒。同一次停住只存一个；两次自动保存至少隔 60 秒。阈值在 `go2w_web.py` 的 `STUCK_*`，等待秒数也可以用环境变量 `GO2W_STUCK_SECONDS` 改。
 
 ## 部署到扩展坞
 
-第一次部署需要重建镜像，因为加了 `python3-aiohttp`；之后只改网页代码的话，同步后刷新浏览器就行，后端代码改了要重启 `go2w_web` 容器。改了 compose（比如 P3 加的 `docker.sock`）要重建这个容器：`docker compose up -d --no-deps web`。
+网页打包在运行镜像里，改了代码要重新打 release 镜像并在扩展坞上切换（`/opt/go2w/current` 指向的 release，配置在 `/opt/go2w/config/runtime.env` 的 `GO2W_IMAGE`）。原来的 `sync.sh dock` + `docker compose up web` 是给 `go2w_humble` / `go2w_web` 用的，现在不能再用，会找不到容器。
 
-1. 同步代码 · 在 Mac 上运行（主仓库的脚本，同步主仓库里的 `web/`）：
-
-   ```bash
-   ~/Desktop/go2w/scripts/sync.sh dock
-   ```
-
-2. 重建镜像并启动网页服务 · 在扩展坞上运行：
-
-   ```bash
-   cd ~/go2w/docker && docker compose build ros && docker compose up -d --no-deps --remove-orphans web
-   ```
-
-   `--no-deps` 保证不会重建正在跑导航的 `go2w_humble`；`--remove-orphans` 会删掉已经不用的 `go2w_foxglove` 容器。
-
-3. 打开网页 · 在 Mac 浏览器里：http://192.168.1.142:8080
+打开网页 · 在 Mac 浏览器里：http://192.168.1.142:8080
 
 ## 常驻服务器入口（192.168.1.166）
 

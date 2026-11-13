@@ -1,155 +1,211 @@
-"""运行档位的进程管理：在 go2w_humble 容器里启停 launch、巡逻、录包、存图（和 scripts/nav.sh 相同的命令）。
+"""Console process lifecycle through the single-container runtime supervisor.
 
-go2w_web 容器通过挂载的 /var/run/docker.sock 调 Docker Engine API 做 docker exec。
-所有 exec 都是后台执行：输出写进 /go2w/data/logs/，后端直接读文件；需要结果时轮询退出码。
-传进 shell 的名字都经过 SAFE_NAME / SAFE_TOPIC 校验，网页不能拼出任意命令。
+Long-lived ROS processes belong to supervisor groups. The web process only owns
+bounded map helpers, launched with validated argv and its inherited ROS setup.
 """
 import ast
 import asyncio
+import json
+import math
 import os
+from pathlib import Path
 import re
-import time
-
-import aiohttp
+import signal
+import stat
 
 SAFE_NAME = re.compile(r'^[A-Za-z0-9_\-]{1,48}$')
-SAFE_TOPIC = re.compile(r'^/[A-Za-z0-9_/]{1,96}$')
+SAFE_TOPIC = re.compile(r'^/[A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*$')
+SAFE_PREFIX = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,29}$')
 MODES = ('mapping', 'localization', 'navigation')
-API = 'http://docker/v1.41'
-ENV = 'source /go2w/docker/ros_env.sh >/dev/null 2>&1; '
-LOGS = '/go2w/data/logs'
-# 各档位的 launch 进程（[x] 写法让 pgrep / pkill 不匹配到自己的命令行）
-LAUNCH = {m: f'[r]os2 launch go2w_bringup {m}.launch.py' for m in MODES}
-PATROL, ROLLBACK = '[p]atrol.py', '[r]ollback_recorder.py'
-# 网页录包用分段录包进程；命令行手动跑的 ros2 bag record（nav.sh）也算在录包里
-BAG_SEG = '[s]egment_recorder.py'
-BAG = f'{BAG_SEG}|[r]os2 bag record'
-BAG_SEGMENT = 30   # 网页录包每个包的秒数
-# 不开导航时给网页遥控用的独立速度桥（导航档自带一个，两者不能同时跑）
-BRIDGE = '[r]os2 launch go2w_bringup control.launch.py'
-# 回溯录制：11-12 起录所有 topic（和网页默认录包一致）；缓存上限 400 MB，数据量大时回溯时长会短于设定值
-ROLLBACK_TOPICS = '--all'
-ALL_TOPICS = '*'   # 录包 topic 列表里写 * = 录所有 topic
+BAG_SEGMENT = 30
+ALL_TOPICS = '*'
 
 
-class DockerProcs:
-    def __init__(self, container='go2w_humble', sock='/var/run/docker.sock'):
-        self.container, self.sock = container, sock
-        self._session = None
+def _name(value):
+    if not isinstance(value, str) or not SAFE_NAME.fullmatch(value):
+        raise ValueError('名字只能包含 1–48 个字母、数字、下划线或连字符')
+    return value
+
+
+def _seconds(value):
+    if isinstance(value, bool):
+        raise ValueError('时长必须在 1–3600 秒之间')
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError('时长必须在 1–3600 秒之间') from error
+    if not math.isfinite(value) or not 1 <= value <= 3600:
+        raise ValueError('时长必须在 1–3600 秒之间')
+    return str(value)
+
+
+class RuntimeProcs:
+    def __init__(self, sock=None, data_dir=None, tools_dir='/opt/go2w/console/tools'):
+        self.sock = str(sock or os.environ.get('GO2W_SUPERVISOR_SOCKET', '/run/go2w/supervisor.sock'))
+        self.data_dir = Path(data_dir or os.environ.get('GO2W_DATA', '/go2w/data'))
+        self.tools_dir = Path(tools_dir)
+        self._helpers = set()
 
     def available(self):
-        return os.path.exists(self.sock)
+        try:
+            return stat.S_ISSOCK(os.stat(self.sock).st_mode)
+        except OSError:
+            return False
 
-    async def session(self):
-        if self._session is None:
-            self._session = aiohttp.ClientSession(connector=aiohttp.UnixConnector(path=self.sock))
-        return self._session
+    async def _request(self, operation, *, timeout=35.0, **arguments):
+        async def exchange():
+            reader, writer = await asyncio.open_unix_connection(self.sock, limit=1024 * 1024)
+            try:
+                writer.write(json.dumps(dict(operation=operation, **arguments)).encode()+b'\n')
+                await writer.drain()
+                raw = await reader.readline()
+                if not raw.endswith(b'\n'):
+                    raise RuntimeError('Runtime supervisor returned an incomplete response')
+                try:
+                    response = json.loads(raw)
+                except (ValueError, UnicodeDecodeError) as error:
+                    raise RuntimeError('Runtime supervisor returned invalid JSON') from error
+                if not isinstance(response, dict) or response.get('ok') is not True:
+                    message = response.get('error') if isinstance(response, dict) else None
+                    raise RuntimeError(message or 'Runtime supervisor request failed')
+                if 'result' not in response:
+                    raise RuntimeError('Runtime supervisor response has no result')
+                return response['result']
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        return await asyncio.wait_for(exchange(), timeout)
 
-    async def _exec(self, script, ros_env=True):
-        # 只用 pgrep / pkill 的命令不加载 ROS 环境：source setup.bash 要占近一秒 CPU，状态检查每 2 s 一次
-        s = await self.session()
-        async with s.post(f'{API}/containers/{self.container}/exec',
-                          json={'Cmd': ['bash', '-c', (ENV if ros_env else '') + script], 'AttachStdout': False, 'AttachStderr': False}) as r:
-            if r.status != 201:
-                raise RuntimeError(f'docker exec 失败：HTTP {r.status} {(await r.text())[:200]}')
-            eid = (await r.json())['Id']
-        async with s.post(f'{API}/exec/{eid}/start', json={'Detach': True, 'Tty': False}) as r:
-            if r.status != 200:
-                raise RuntimeError(f'docker exec 启动失败：HTTP {r.status}')
-        return eid
-
-    async def run(self, script, timeout=30.0, ros_env=False):
-        """执行并等它结束，返回退出码。"""
-        eid = await self._exec(script, ros_env)
-        s, t0 = await self.session(), time.monotonic()
-        while True:
-            async with s.get(f'{API}/exec/{eid}/json') as r:
-                info = await r.json()
-            if not info.get('Running'):
-                return info.get('ExitCode')
-            if time.monotonic() - t0 > timeout:
-                raise asyncio.TimeoutError()
-            await asyncio.sleep(0.1)
-
-    async def spawn(self, script):
-        """后台启动，不等结束（相当于 docker exec -d）。"""
-        await self._exec(script)
-
-    # ---------- 高层操作 ----------
     async def status(self):
-        """哪些进程在跑：一次 exec，用退出码的各个位表示。"""
-        checks = [*(LAUNCH[m] for m in MODES), PATROL, BAG, ROLLBACK, BRIDGE, BAG_SEG]
-        script = 'r=0; ' + ' '.join(f'pgrep -f "{p}" >/dev/null && r=$((r|{1 << i}));' for i, p in enumerate(checks)) + ' exit $r'
-        code = await self.run(script, 5.0)
-        keys = [*MODES, 'patrol', 'bag', 'rollback', 'bridge', 'bag_seg']   # bag_seg：录包是网页的分段录包
-        return {k: bool(code & (1 << i)) for i, k in enumerate(keys)}
+        groups = await self._request('status', timeout=5.0)
+        if not isinstance(groups, dict):
+            raise RuntimeError('Runtime supervisor returned invalid process status')
+        navigation = groups.get('navigation', {})
+        running = bool(navigation.get('running'))
+        mode = navigation.get('environment', {}).get('GO2W_NAVIGATION_MODE') or 'navigation'
+        if running and mode not in MODES:
+            raise RuntimeError('Runtime supervisor returned an unknown navigation mode')
+        result = {name: running and mode == name for name in MODES}
+        result.update({name: bool(groups.get(name, {}).get('running'))
+                       for name in ('patrol', 'bag', 'rollback', 'bridge')})
+        result['bag_seg'] = result['bag']
+        return result
+
+    async def _start(self, name, environment=None):
+        return await self._request('start', name=name, environment=environment or {})
+
+    async def _stop(self, name):
+        result = await self._request('stop', name=name)
+        return isinstance(result, dict) and not result.get('running', False)
 
     async def start_mode(self, mode, map_yaml=None):
-        assert mode in MODES
-        arg = ''
+        if mode not in MODES:
+            raise ValueError('不支持的运行档位')
+        environment = {'GO2W_NAVIGATION_MODE': mode}
         if mode != 'mapping':
-            assert map_yaml and SAFE_NAME.match(map_yaml)
-            arg = f' map:=/go2w/data/maps/{map_yaml}.yaml'
-        log = f'{LOGS}/{mode}.log'
-        await self.spawn(f'mkdir -p {LOGS}; [ -f {log} ] && mv {log} {LOGS}/{mode}_$(date +%Y%m%d_%H%M%S).log; '
-                         f'chown -R 1000:1000 /go2w/data; exec ros2 launch go2w_bringup {mode}.launch.py{arg} > {log} 2>&1')
+            environment['GO2W_MAP'] = _name(map_yaml)+'.yaml'
+        return await self._start('navigation', environment)
 
     async def stop_modes(self):
-        """和 nav.sh stop 一样：先 SIGINT 让 launch 正常退出，10 s 后强杀残留。返回是否全部停掉。"""
-        code = await self.run(
-            f'pkill -INT -f "{PATROL}"; pkill -INT -f "[r]os2 launch go2w_bringup"; '
-            f'for i in $(seq 1 20); do pgrep -f "[r]os2 launch go2w_bringup" >/dev/null || break; sleep 0.5; done; '
-            f'pkill -9 -f "[f]astlio_mapping|[l]ivox_ros_driver2_node|[g]o2w_cmd_bridge.py"; '
-            f'pgrep -f "[r]os2 launch go2w_bringup" >/dev/null && exit 1; exit 0', 30.0)
-        return code == 0
+        # These are the only groups owned by mode switching. In particular,
+        # control, the C++ DDS recorder, and this web process are independent.
+        stopped = True
+        for name in ('patrol', 'navigation', 'bridge'):
+            stopped = await self._stop(name) and stopped
+        return stopped
 
     async def start_bridge(self):
-        log = f'{LOGS}/teleop_bridge.log'
-        await self.spawn(f'mkdir -p {LOGS}; exec ros2 launch go2w_bringup control.launch.py require_odom:=false > {log} 2>&1')
+        # The manager atomically guards exclusivity with navigation's bridge.
+        return await self._start('bridge')
 
     async def stop_bridge(self):
-        """SIGINT：速度桥退出前会先发 StopMove。返回是否停掉。"""
-        code = await self.run(
-            f'pkill -INT -f "{BRIDGE}"; for i in $(seq 1 16); do pgrep -f "{BRIDGE}" >/dev/null || break; sleep 0.5; done; '
-            f'pkill -9 -f "{BRIDGE}"; pkill -9 -f "[g]o2w_cmd_bridge.py"; sleep 0.3; pgrep -f "[g]o2w_cmd_bridge.py" >/dev/null && exit 1; exit 0', 15.0)
-        return code == 0
+        return await self._stop('bridge')
+
+    async def start_patrol(self, loops=1):
+        if type(loops) is not int or not 1 <= loops <= 1000:
+            raise ValueError('巡逻圈数必须是 1–1000 的整数')
+        return await self._start('patrol', {'GO2W_PATROL_LOOPS': str(loops)})
 
     async def stop_patrol(self):
-        await self.run(f'pkill -INT -f "{PATROL}"; exit 0', 5.0)
+        return await self._stop('patrol')
 
     async def start_bag(self, prefix, topics, seconds=BAG_SEGMENT):
-        """分段录包：每 seconds 秒一个包，包名 = 前缀_MMDD_HHMMSS（这一段的开始时间）。"""
-        assert SAFE_NAME.match(prefix) and topics and all(t == ALL_TOPICS or SAFE_TOPIC.match(t) for t in topics)
-        args = (['--all'] if ALL_TOPICS in topics else []) + [t for t in topics if t != ALL_TOPICS]
-        await self.spawn(f'mkdir -p /go2w/data/bags {LOGS}; chown -R 1000:1000 /go2w/data; '
-                         f'exec python3 /go2w/scripts/segment_recorder.py --seconds {float(seconds)} --prefix {prefix} '
-                         f'{" ".join(args)} > {LOGS}/bag_{prefix}_$(date +%m%d_%H%M%S).log 2>&1')
+        prefix = _name(prefix)
+        if (not SAFE_PREFIX.fullmatch(prefix) or not isinstance(topics, (list, tuple)) or not topics
+                or len(topics) > 256
+                or any(not isinstance(topic, str) or
+                       (topic != ALL_TOPICS and not SAFE_TOPIC.fullmatch(topic)) for topic in topics)):
+            raise ValueError('录包前缀或 topic 列表无效')
+        encoded = json.dumps(list(topics), separators=(',', ':'))
+        if len(encoded) > 4096:
+            raise ValueError('录包 topic 列表过长')
+        return await self._start('bag', {'GO2W_BAG_PREFIX': prefix,
+            'GO2W_BAG_TOPICS': encoded, 'GO2W_BAG_SECONDS': _seconds(seconds)})
 
     async def stop_bag(self):
-        # 分段录包收到 SIGINT 会把当前这段写完再退出（大包可能要几秒）
-        await self.run(f'pkill -INT -f "{BAG}"; for i in $(seq 1 30); do pgrep -f "{BAG}" >/dev/null || break; sleep 0.5; done; '
-                       f'chown -R 1000:1000 /go2w/data/bags; exit 0', 15.0)
+        return await self._stop('bag')
 
     async def start_rollback(self, seconds):
-        await self.spawn(f'mkdir -p /go2w/data/bags {LOGS}; '
-                         f'exec python3 /go2w/scripts/rollback_recorder.py --seconds {float(seconds)} {ROLLBACK_TOPICS} > {LOGS}/rollback.log 2>&1')
+        # The runtime entrypoint supplies --all, preserving the deployed UI.
+        return await self._start('rollback', {'GO2W_ROLLBACK_SECONDS': _seconds(seconds)})
 
     async def stop_rollback(self):
-        await self.run(f'pkill -INT -f "{ROLLBACK}"; for i in $(seq 1 10); do pgrep -f "{ROLLBACK}" >/dev/null || break; sleep 0.5; done; '
-                       f'pkill -9 -f "{ROLLBACK}"; exit 0', 10.0)
+        return await self._stop('rollback')
+
+    async def _interrupt_helper(self, process):
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        # Map helpers share this process group with their ROS CLI children.
+        # Never force-kill ROS processes; retain ownership until they exit.
+        await process.wait()
+
+    async def _run_helper(self, argv, log_name, timeout):
+        logs = self.data_dir/'logs'
+        logs.mkdir(parents=True, exist_ok=True)
+        environment = dict(os.environ, GO2W_DATA=str(self.data_dir))
+        with (logs/log_name).open('ab', buffering=0) as output:
+            process = await asyncio.create_subprocess_exec(*map(str, argv),
+                stdin=asyncio.subprocess.DEVNULL, stdout=output, stderr=asyncio.subprocess.STDOUT,
+                env=environment, start_new_session=True)
+        self._helpers.add(process)
+        try:
+            return await asyncio.wait_for(process.wait(), timeout)
+        finally:
+            try:
+                await asyncio.shield(self._interrupt_helper(process))
+            finally:
+                self._helpers.discard(process)
 
     async def save_map(self, name):
-        assert SAFE_NAME.match(name)
-        return await self.run(f'bash /go2w/scripts/save_map.sh {name} > {LOGS}/save_map.log 2>&1', 40.0) == 0  # 脚本自己加载 ROS 环境
+        name = _name(name)
+        return await self._run_helper(['bash', self.tools_dir/'save_map.sh', name],
+                                      'save_map.log', 40.0) == 0
 
     async def align_map(self, source, target, angle):
-        assert SAFE_NAME.fullmatch(source) and SAFE_NAME.fullmatch(target)
-        return await self.run(
-            f'python3 /go2w/scripts/calib/align_map.py /go2w/data/maps '
-            f'{source} {target} {angle!r} > {LOGS}/align_map.log 2>&1', 120.0) == 0
+        source, target = _name(source), _name(target)
+        if source == target:
+            raise ValueError('源地图和目标地图必须使用不同名字')
+        if isinstance(angle, bool):
+            raise ValueError('旋转角必须在 -90° 到 90° 之间')
+        try:
+            angle = float(angle)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError('旋转角必须在 -90° 到 90° 之间') from error
+        if not math.isfinite(angle) or abs(angle) > math.pi/2:
+            raise ValueError('旋转角必须在 -90° 到 90° 之间')
+        return await self._run_helper(['python3', self.tools_dir/'align_map.py',
+            self.data_dir/'maps', source, target, str(angle)], 'align_map.log', 120.0) == 0
+
+    async def close(self):
+        # Closing the web adapter never stops supervisor-owned modules.
+        await asyncio.gather(*(self._interrupt_helper(process) for process in tuple(self._helpers)))
 
 
-# ---------- 直接读数据目录（web 容器和导航容器挂的是同一个仓库） ----------
+# Data lists are read locally from the same persistent data mount.
 def tail(path, n=12):
     try:
         with open(path, errors='replace') as f:
